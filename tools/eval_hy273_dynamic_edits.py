@@ -697,15 +697,19 @@ def aggregate(args: argparse.Namespace) -> None:
         for label in labels
         if (label, "000038") in by_key
     }
-    known_pair_summary = {
-        "instruction": next(iter(known_pair.values()))["instruction"],
-        "source": next(iter(known_pair.values()))["metrics"]["source"],
-        "target": next(iter(known_pair.values()))["metrics"]["target"],
-        "predictions": {
-            label: record["metrics"]["prediction"]
-            for label, record in known_pair.items()
-        },
-    }
+    if known_pair:
+        reference_pair = next(iter(known_pair.values()))
+        known_pair_summary = {
+            "instruction": reference_pair["instruction"],
+            "source": reference_pair["metrics"]["source"],
+            "target": reference_pair["metrics"]["target"],
+            "predictions": {
+                label: record["metrics"]["prediction"]
+                for label, record in known_pair.items()
+            },
+        }
+    else:
+        known_pair_summary = None
 
     render_ids: list[str] = []
     for category, pair_ids in selection["selected_by_category"].items():
