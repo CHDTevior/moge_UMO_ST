@@ -12,12 +12,13 @@ generated results, external repositories, or the interactive demo.
 
 Status date: 2026-07-28.
 
-| Capability | Implemented in code | Trained in current K-Encoder 200K parent |
+| Capability | Implemented in code | Included in current K-Encoder training |
 |---|---:|---:|
 | Text-to-Motion | yes | yes |
-| Kimodo-like Control | yes | no |
-| Motion Editing | yes | no |
-| Edit + Control composition | yes | no |
+| Kimodo-like Control | yes | yes |
+| Motion Editing | yes | yes |
+| Ease-in/Ease-out conditioning | yes | yes |
+| Edit + Control composition | yes | implemented, not active in Stage-BC |
 
 The selected base model is **K-Encoder Stage-A 200K**:
 
@@ -31,33 +32,47 @@ training:                   0 -> 200K, pure T2M, DDP4 x 32
 global batch:               128
 ```
 
-The checkpoint remains local and is not part of this repository:
+Stage-A is followed by:
+
+```text
+Stage-BE: 200K -> 250K, T2M / Control / Edit = 60% / 0% / 40%
+Stage-BC: 250K -> 400K, T2M / Control / Edit = 10% / 70% / 20%
+```
+
+Stage-BE established Motion Editing while replaying T2M. Stage-BC adds
+Kimodo-like Control and physical 6D Ease conditioning while retaining 20% Edit
+replay. Ease is independently present for 25% of T2M and 50% of Control
+samples, and is forbidden on Edit samples.
+
+The current Stage-BC parent and run remain local and are not part of this
+repository:
 
 ```text
 /mnt/afs/mogeflow-control/outputs/hy273_text_fusion/
-hy273_kencoder_stageA_ddp4x32_20260727_0832/model/step_00200000.pt
+hy273_kencoder_stageBE_t2m60_edit40_ddp8x16_20260728_131901/
+model/step_00250000.pt
+
+/mnt/afs/mogeflow-control/outputs/hy273_text_fusion/
+hy273_kencoder_stageBC_ease_t2m10_ctrl70_edit20_ddp8x16_20260728_201555
 ```
 
-The old Control-first launcher
-`scripts/launch/train_hy273_llm2vec_kencoder_stage_b_ddp8.sh` is retained for
-review but is currently paused. Do not launch it as the next formal stage.
+The active Stage-BC launcher is:
 
-The current proposed next stage is an Edit bootstrap:
-
-```text
-200K -> 250K
-T2M / Control / Edit = 60% / 0% / 40%
+```bash
+bash scripts/launch/train_hy273_kencoder_stage_bc_ease_control_ddp8.sh
 ```
 
-This ratio and its rationale are documented in
-[docs/CURRENT_T2M_EDIT_CONTROL_DESIGN_CN.md](docs/CURRENT_T2M_EDIT_CONTROL_DESIGN_CN.md).
-The new schedule is deliberately not registered yet because the Control design
-is under review.
+It requires the local 250K Stage-BE checkpoint, unified manifests/stats,
+LLM2Vec cache, and Ease stats. It uses DDP8 x 16, saves `latest.pt` every 10K,
+archives every 50K, and stops at 400K.
 
 ## Key documents
 
 - [Current T2M/Edit/Control architecture and training design](docs/CURRENT_T2M_EDIT_CONTROL_DESIGN_CN.md)
 - [K-Encoder Stage-A 200K results](docs/KENCODER_STAGE_A_200K_RESULTS_CN.md)
+- [Ease/Control implementation plan](docs/HY273_EASE_CONTROL_IMPLEMENTATION_PLAN_CN.md)
+- [Stage-BC launch record](docs/HY273_KENCODER_STAGEBC_EASE_LAUNCH_CN_20260728.md)
+- [GPT-5.6 scientific review](docs/HY273_EASE_GPT56_REVIEW.md)
 - [Text-conditioning redesign](docs/HY273_TEXT_CONDITION_FUSION_REDESIGN_CN_20260726.md)
 - [Previous Edit experiments and conclusions](docs/HY273_R13_EDIT_450K_PROGRESS_AND_NEXT_PLAN_CN.md)
 - [HY273 versus Kimodo Control training patterns](docs/HY273_KIMODO_CONTROL_PATTERN_TRAINING_COMPARISON_CN.md)

@@ -181,6 +181,12 @@ def make_edit_condition(
             device=source_motion.device,
             dtype=torch.long,
         ),
+        ease_physical=torch.zeros(
+            bsz, 6, device=source_motion.device, dtype=torch.float32
+        ),
+        ease_present=torch.zeros(
+            bsz, device=source_motion.device, dtype=torch.bool
+        ),
         target_to_source_time_map=None,
     )
     condition.validate()
@@ -836,6 +842,14 @@ def main() -> None:
         default="learned",
     )
     parser.add_argument("--control_cfg_scale", type=float, default=None)
+    parser.add_argument(
+        "--ease",
+        nargs=6,
+        type=float,
+        default=None,
+        metavar=("EIX", "EIY", "EIZ", "EOX", "EOY", "EOZ"),
+        help="Physical Ease [E_in_xyz,E_out_xyz] in meters.",
+    )
     parser.add_argument("--contact_init", choices=["random", "half", "zeros"], default="random")
     parser.add_argument("--contact_feedback", choices=["blend", "prob", "fixed"], default="blend")
     parser.add_argument(
@@ -894,6 +908,16 @@ def main() -> None:
             target_lengths=lengths,
             capability=capability,
         )
+    if args.ease is not None:
+        if args.mode.startswith("edit"):
+            raise ValueError("The first Ease protocol supports GENERATE routes only")
+        ease = torch.tensor(args.ease, dtype=torch.float32).view(1, 6)
+        condition = replace(
+            condition,
+            ease_physical=ease.expand(bsz, 6).clone(),
+            ease_present=torch.ones(bsz, dtype=torch.bool),
+        )
+        condition.validate()
     text_profiles = (
         [RELATIVE_EDIT_TEXT_PROFILE] * bsz
         if args.mode.startswith("edit")
@@ -962,6 +986,9 @@ def main() -> None:
         "texts": texts,
         "runtime_encoded_text_rows": int(runtime_text_rows.count),
         "lengths": lengths.tolist(),
+        "ease_physical": (
+            None if args.ease is None else [float(value) for value in args.ease]
+        ),
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

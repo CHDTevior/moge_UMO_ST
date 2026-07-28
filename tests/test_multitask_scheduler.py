@@ -6,9 +6,12 @@ import pytest
 
 from data.hy273_multitask_scheduler import (
     CONTEXT_ONLY_EDIT_SCHEDULE_VERSION,
+    DECOMPOSED_CFG_EDIT_SCHEDULE_VERSIONS,
     PROB_SCALE,
     EditConditionPattern,
     HIGH_LEVEL_SCHEDULE_VERSION,
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
     R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
     STAGE_C_EDIT20_SCHEDULE_VERSION,
     STAGE_C_SAFE_MIX_SCHEDULE_VERSION,
@@ -19,11 +22,12 @@ from data.hy273_multitask_scheduler import (
     UNIFIED_EDIT_V2_EDIT40_SCHEDULE_VERSION,
     WeightedDeficitScheduler,
     edit_pattern_from_draw,
+    ease_present_from_draw,
     optimizer_group_hparams,
     phase_for_step,
     probability_units_for_step,
 )
-from models.raw_motion.hy273_multitask_condition import TrainStream
+from models.raw_motion.hy273_multitask_condition import CapabilityId, TrainStream
 
 
 def test_phase_boundaries_and_optimizer_groups():
@@ -78,6 +82,148 @@ def test_r16_stage_b_is_fixed_t2m_control_without_edit():
             R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
         )["G1_context_weight"]["lr"]
         == 0.0
+    )
+
+
+def test_kencoder_stage_be_is_fixed_t2m_edit_with_decomposed_cfg():
+    assert probability_units_for_step(
+        199_999, KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+    ).__dict__ == {"t2m": PROB_SCALE, "control": 0, "edit": 0}
+    for step in (200_000, 224_999, 249_999):
+        assert probability_units_for_step(
+            step, KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+        ).__dict__ == {
+            "t2m": 3_000_000,
+            "control": 0,
+            "edit": 2_000_000,
+        }
+
+    hparams = optimizer_group_hparams(
+        200_000, KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+    )
+    assert hparams["G0_existing"]["lr"] == 5e-5
+    assert hparams["G1_context_weight"]["lr"] == 1e-4
+    assert hparams["G2_context_bias"]["lr"] == 1e-4
+
+    draws = [
+        0,
+        (1 << 64) * 81 // 100,
+        (1 << 64) * 91 // 100,
+        (1 << 64) * 96 // 100,
+    ]
+    assert [
+        edit_pattern_from_draw(
+            draw, KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+        )
+        for draw in draws
+    ] == [
+        EditConditionPattern.SOURCE_TEXT,
+        EditConditionPattern.SOURCE_IDENTITY,
+        EditConditionPattern.TEXT_ONLY,
+        EditConditionPattern.UNCONDITIONAL,
+    ]
+
+
+def test_kencoder_stage_be_schedule_forks_only_at_200k():
+    stage_a = WeightedDeficitScheduler()
+    for _ in range(200_000):
+        stage_a.choose()
+
+    stage_be = WeightedDeficitScheduler(
+        schedule_version=KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+    )
+    stage_be.load_state_dict(
+        stage_a.state_dict(),
+        allow_schedule_fork_at_step=200_000,
+    )
+    selected = [stage_be.choose() for _ in range(10)]
+    assert selected.count(TrainStream.HML_MIXED) == 6
+    assert selected.count(TrainStream.MOTION_EDIT) == 4
+
+    rejected = WeightedDeficitScheduler(
+        schedule_version=KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+    )
+    with pytest.raises(ValueError, match="version mismatch"):
+        rejected.load_state_dict(
+            stage_a.state_dict(),
+            allow_schedule_fork_at_step=199_999,
+        )
+
+
+def test_kencoder_stage_bc_ease_control_mix_and_fork():
+    assert (
+        KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+        in DECOMPOSED_CFG_EDIT_SCHEDULE_VERSIONS
+    )
+    assert probability_units_for_step(
+        250_000, KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+    ).__dict__ == {
+        "t2m": 500_000,
+        "control": 3_500_000,
+        "edit": 1_000_000,
+    }
+    hparams = optimizer_group_hparams(
+        250_000, KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+    )
+    assert list(hparams) == [
+        "G0_existing",
+        "G1_context_weight",
+        "G2_context_bias",
+        "G3_ease_weight",
+        "G4_ease_bias",
+    ]
+    assert hparams["G0_existing"]["lr"] == 5e-5
+    assert hparams["G3_ease_weight"]["lr"] == 1e-4
+
+    stage_be = WeightedDeficitScheduler(
+        schedule_version=KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+    )
+    stage_be.state.next_step = 250_000
+    stage_bc = WeightedDeficitScheduler(
+        schedule_version=KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+    )
+    stage_bc.load_state_dict(
+        stage_be.state_dict(),
+        allow_schedule_fork_at_step=250_000,
+    )
+    selected = [stage_bc.choose() for _ in range(10)]
+    assert selected.count(TrainStream.HML_MIXED) == 8
+    assert selected.count(TrainStream.MOTION_EDIT) == 2
+
+    draws = [
+        0,
+        (1 << 64) * 81 // 100,
+        (1 << 64) * 91 // 100,
+        (1 << 64) * 96 // 100,
+    ]
+    assert [
+        edit_pattern_from_draw(
+            draw, KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+        )
+        for draw in draws
+    ] == [
+        EditConditionPattern.SOURCE_TEXT,
+        EditConditionPattern.SOURCE_IDENTITY,
+        EditConditionPattern.TEXT_ONLY,
+        EditConditionPattern.UNCONDITIONAL,
+    ]
+
+
+def test_ease_presence_is_independent_and_capability_specific():
+    quarter = (1 << 64) // 4
+    half = (1 << 64) // 2
+    schedule = KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+    assert ease_present_from_draw(CapabilityId.T2M, quarter - 1, schedule)
+    assert not ease_present_from_draw(CapabilityId.T2M, quarter, schedule)
+    assert ease_present_from_draw(
+        CapabilityId.KIMODO_CONTROL, half - 1, schedule
+    )
+    assert not ease_present_from_draw(
+        CapabilityId.KIMODO_CONTROL, half, schedule
+    )
+    assert not ease_present_from_draw(CapabilityId.MOTION_EDIT, 0, schedule)
+    assert not ease_present_from_draw(
+        CapabilityId.KIMODO_CONTROL, 0, HIGH_LEVEL_SCHEDULE_VERSION
     )
 
 

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .hy273_ease import HY273EaseConditioner
 from .hy273_multitask_condition import (
     NUM_SOURCE_ROLES,
     NUM_TARGET_OPS,
@@ -390,6 +391,7 @@ class KimodoContextFlowOutput:
     text_tokens: torch.Tensor
     text_pooled: torch.Tensor
     text_padding_mask: torch.Tensor
+    ease_bias: torch.Tensor
 
 
 class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
@@ -401,10 +403,13 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
         max_frames: int = 300,
         normalize_contacts: bool = False,
         source_fusion_mode: str = "additive",
+        use_ease: bool = False,
+        ease_stats_dir: str | Path = "",
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.source_fusion_mode = str(source_fusion_mode)
+        self.use_ease = bool(use_ease)
         if self.source_fusion_mode not in {"additive", "token_block"}:
             raise ValueError(
                 "source_fusion_mode must be 'additive' or 'token_block', got "
@@ -425,6 +430,11 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
                 variance_eps=stats_variance_eps,
                 normalize_contacts=normalize_contacts,
             )
+            self.ease_conditioner = (
+                HY273EaseConditioner(self.hidden_dim, ease_stats_dir)
+                if self.use_ease
+                else None
+            )
 
     def context_weight_parameters(self) -> tuple[nn.Parameter, ...]:
         return self.source_context.weight_parameters()
@@ -432,12 +442,24 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
     def context_bias_parameters(self) -> tuple[nn.Parameter, ...]:
         return self.source_context.bias_and_embedding_parameters()
 
+    def ease_weight_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.ease_conditioner is None:
+            return ()
+        return self.ease_conditioner.weight_parameters()
+
+    def ease_bias_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.ease_conditioner is None:
+            return ()
+        return self.ease_conditioner.bias_parameters()
+
     def base_parameters(self) -> tuple[nn.Parameter, ...]:
         auxiliary_ids = {
             id(param)
             for param in (
                 *self.context_weight_parameters(),
                 *self.context_bias_parameters(),
+                *self.ease_weight_parameters(),
+                *self.ease_bias_parameters(),
             )
         }
         return tuple(
@@ -581,10 +603,28 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
         use_source_token_block = self.source_fusion_mode == "token_block" and bool(
             context_present.any().item()
         )
+        if self.use_ease:
+            if condition is None:
+                ease_physical = model_in.new_zeros((bsz, 6), dtype=torch.float32)
+                ease_present = torch.zeros(bsz, device=device, dtype=torch.bool)
+            else:
+                ease_physical = condition.ease_physical.to(device=device)
+                ease_present = condition.ease_present.to(device=device)
+            if self.ease_conditioner is None:
+                raise RuntimeError("Ease is enabled without an Ease conditioner")
+            ease_bias = self.ease_conditioner(
+                ease_physical,
+                ease_present,
+                dtype=dtype,
+            ).unsqueeze(1)
+        else:
+            if condition is not None and bool(condition.ease_present.any()):
+                raise ValueError("Condition carries Ease but the model has Ease disabled")
+            ease_bias = model_in.new_zeros((bsz, 1, self.hidden_dim))
 
         state = model_in[..., :DIM_HY273]
         motion_mask = model_in[..., DIM_HY273:]
-        root_hidden = self.root_input_proj(model_in)
+        root_hidden = self.root_input_proj(model_in) + ease_bias
         if self.self_conditioning and x_self_cond is not None:
             root_hidden = root_hidden + self.self_cond_scale * self.root_self_cond_proj(
                 x_self_cond[..., :ROOT_DIM].to(device=device, dtype=dtype)
@@ -612,7 +652,7 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
         local_root = self.root_conditioner(bridge_root, lengths)
 
         body_in = torch.cat([local_root, state[..., ROOT_DIM:], motion_mask], dim=-1)
-        body_hidden = self.body_input_proj(body_in)
+        body_hidden = self.body_input_proj(body_in) + ease_bias
         if self.self_conditioning and x_self_cond is not None:
             body_hidden = body_hidden + self.self_cond_scale * self.body_self_cond_proj(
                 x_self_cond[..., ROOT_DIM:].to(device=device, dtype=dtype)
@@ -643,5 +683,6 @@ class HY273KimodoContextFlow(HY273RedenoiseKimodoLike):
                 text_tokens=text_cond.tokens,
                 text_pooled=text_cond.pooled,
                 text_padding_mask=text_cond.padding_mask,
+                ease_bias=ease_bias,
             )
         return prediction

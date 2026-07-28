@@ -16,6 +16,7 @@ from data.hy273_multitask_scheduler import (
     EditConditionPattern,
     SamplePlan,
     bernoulli_from_draw,
+    ease_present_from_draw,
     edit_pattern_from_draw,
     hml_capability_from_draw,
     sample_key_u64,
@@ -29,6 +30,7 @@ from models.raw_motion.hy273_multitask_condition import (
     TaskId,
     TrainStream,
 )
+from models.raw_motion.hy273_ease import ease_from_k273
 from models.raw_motion.hy273_normalizer import apply_yaw_rotation, root_origin_shift
 from models.raw_motion.hy273_slices import CONTACT_SLICE, DIM_HY273, HEADING_SLICE
 
@@ -201,6 +203,12 @@ class HY273MultitaskManifestDataset:
             frame_policy = FramePolicy.INDEPENDENT_SEQUENCE
             text = "" if plan.text_drop else str(text_row["value"])
             profile = str(text_row["encoding_profile"])
+            ease_present = bool(plan.ease_present)
+            ease_physical = (
+                ease_from_k273(target)
+                if ease_present
+                else torch.zeros(6, dtype=torch.float32)
+            )
         else:
             if plan.edit_pattern is None:
                 raise ValueError("MotionFix SamplePlan requires an edit condition pattern")
@@ -260,6 +268,10 @@ class HY273MultitaskManifestDataset:
             frame_policy = FramePolicy.INDEPENDENT_SEQUENCE
             text = "" if plan.text_drop else str(text_row["value"])
             profile = str(text_row["encoding_profile"])
+            if plan.ease_present:
+                raise ValueError("MotionFix Edit replay cannot carry Ease in v1")
+            ease_present = False
+            ease_physical = torch.zeros(6, dtype=torch.float32)
 
         target_valid = torch.ones(target.shape[0], dtype=torch.bool)
         target_ops = torch.full((target.shape[0],), int(op), dtype=torch.long)
@@ -284,6 +296,8 @@ class HY273MultitaskManifestDataset:
             "requested_target_len": int(target.shape[0]),
             "frame_gauge_dir": gauge,
             "frame_policy_id": int(frame_policy),
+            "ease_physical": ease_physical,
+            "ease_present": ease_present,
             "target_applied_yaw_delta": float(target_delta),
             "source_applied_yaw_deltas": source_deltas,
             "plan": plan,
@@ -324,6 +338,11 @@ def build_global_sample_plans(
             )
             caption_index = draw("caption") % dataset.caption_count(row_index)
             text_drop = bernoulli_from_draw(draw("hml_text_dropout"), 0.10)
+            ease_present = ease_present_from_draw(
+                capability,
+                draw("ease_presence"),
+                schedule_version,
+            )
             edit_pattern = None
         else:
             edit_pattern = edit_pattern_from_draw(
@@ -336,6 +355,7 @@ def build_global_sample_plans(
             )
             caption_index = None
             text_drop = not edit_pattern.uses_text
+            ease_present = False
         plans.append(
             SamplePlan(
                 global_step=int(global_step),
@@ -349,6 +369,7 @@ def build_global_sample_plans(
                 control_u64=draw("control_pattern"),
                 text_drop=bool(text_drop),
                 edit_pattern=edit_pattern,
+                ease_present=bool(ease_present),
             )
         )
     return plans
@@ -423,6 +444,12 @@ def collate_hy273_multitask(samples: Sequence[dict[str, Any]]) -> dict[str, Any]
         ),
         frame_policy_id=torch.tensor(
             [sample["frame_policy_id"] for sample in samples], dtype=torch.long
+        ),
+        ease_physical=torch.stack(
+            [sample["ease_physical"] for sample in samples]
+        ),
+        ease_present=torch.tensor(
+            [sample["ease_present"] for sample in samples], dtype=torch.bool
         ),
         target_to_source_time_map=None,
     )

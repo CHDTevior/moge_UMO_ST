@@ -17,6 +17,12 @@ HIGH_LEVEL_SCHEDULE_VERSION = "hy273_multitask_weighted_deficit_v1"
 R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION = (
     "hy273_multitask_r16_stage_b_fixed_10_90_0_v1"
 )
+KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION = (
+    "hy273_kencoder_stage_be_fixed_60_0_40_v1"
+)
+KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION = (
+    "hy273_kencoder_stage_bc_fixed_10_70_20_ease_v1"
+)
 STAGE_C_SAFE_MIX_SCHEDULE_VERSION = (
     "hy273_multitask_weighted_deficit_stagec_fixed_18_80_02_v1"
 )
@@ -41,11 +47,19 @@ UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION = (
 UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION = (
     "hy273_multitask_unified_fixed_10_10_80_decomposed_cfg_v1"
 )
+DECOMPOSED_CFG_EDIT_SCHEDULE_VERSIONS = {
+    KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION,
+    UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION,
+}
 JOINT_ONLY_UNIFIED_EDIT_SCHEDULE_VERSIONS = {
     UNIFIED_EDIT_V2_SCHEDULE_VERSION,
     UNIFIED_EDIT_V2_EDIT40_SCHEDULE_VERSION,
 }
 UNIFIED_EDIT_SCHEDULE_VERSIONS = {
+    KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
     *JOINT_ONLY_UNIFIED_EDIT_SCHEDULE_VERSIONS,
     UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION,
     UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION,
@@ -57,6 +71,7 @@ SUPPORTED_HIGH_LEVEL_SCHEDULES = {
     STAGE_C_EDIT20_SCHEDULE_VERSION,
     STAGE_D_EDIT_CALIBRATION_SCHEDULE_VERSION,
     CONTEXT_ONLY_EDIT_SCHEDULE_VERSION,
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
     *UNIFIED_EDIT_SCHEDULE_VERSIONS,
 }
 HML_INNER_SCHEDULE_VERSION = "hy273_hml_stateless_bernoulli_v1"
@@ -144,6 +159,17 @@ def probability_units_for_step(
         if phase_for_step(step) == TrainingPhase.STAGE_A:
             return PhaseProbabilityUnits(PROB_SCALE, 0, 0)
         return PhaseProbabilityUnits(500_000, 4_500_000, 0)
+    if schedule_version == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION:
+        if phase_for_step(step) == TrainingPhase.STAGE_A:
+            return PhaseProbabilityUnits(PROB_SCALE, 0, 0)
+        return PhaseProbabilityUnits(3_000_000, 0, 2_000_000)
+    if schedule_version == KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION:
+        phase = phase_for_step(step)
+        if phase == TrainingPhase.STAGE_A:
+            return PhaseProbabilityUnits(PROB_SCALE, 0, 0)
+        if phase == TrainingPhase.STAGE_B1:
+            return PhaseProbabilityUnits(3_000_000, 0, 2_000_000)
+        return PhaseProbabilityUnits(500_000, 3_500_000, 1_000_000)
     if schedule_version in {
         UNIFIED_EDIT_V2_SCHEDULE_VERSION,
         UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION,
@@ -199,6 +225,23 @@ def optimizer_group_hparams(
     if schedule_version not in SUPPORTED_HIGH_LEVEL_SCHEDULES:
         raise ValueError(f"Unknown high-level schedule: {schedule_version!r}")
     phase = phase_for_step(step)
+    if (
+        schedule_version == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+        and phase == TrainingPhase.STAGE_B1
+    ):
+        return {
+            "G0_existing": {"lr": 5e-5, "weight_decay": 0.01},
+            "G1_context_weight": {"lr": 1e-4, "weight_decay": 0.01},
+            "G2_context_bias": {"lr": 1e-4, "weight_decay": 0.0},
+        }
+    if schedule_version == KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION:
+        return {
+            "G0_existing": {"lr": 5e-5, "weight_decay": 0.01},
+            "G1_context_weight": {"lr": 1e-4, "weight_decay": 0.01},
+            "G2_context_bias": {"lr": 1e-4, "weight_decay": 0.0},
+            "G3_ease_weight": {"lr": 1e-4, "weight_decay": 0.01},
+            "G4_ease_bias": {"lr": 1e-4, "weight_decay": 0.0},
+        }
     freeze_context_through_stage_b = (
         schedule_version == R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION
         and phase in {TrainingPhase.STAGE_B1, TrainingPhase.STAGE_B2}
@@ -301,6 +344,20 @@ class WeightedDeficitScheduler:
                 )
                 or (
                     self.schedule_version
+                    == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+                    and payload_version == HIGH_LEVEL_SCHEDULE_VERSION
+                    and allow_schedule_fork_at_step == 200_000
+                    and int(payload.get("next_step", -1)) == 200_000
+                )
+                or (
+                    self.schedule_version
+                    == KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+                    and payload_version == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+                    and allow_schedule_fork_at_step == 250_000
+                    and int(payload.get("next_step", -1)) == 250_000
+                )
+                or (
+                    self.schedule_version
                     == STAGE_D_EDIT_CALIBRATION_SCHEDULE_VERSION
                     and payload_version == STAGE_C_EDIT20_SCHEDULE_VERSION
                     and allow_schedule_fork_at_step == 500_000
@@ -392,6 +449,23 @@ def edit_pattern_from_draw(
     schedule_version: str = HIGH_LEVEL_SCHEDULE_VERSION,
 ) -> EditConditionPattern:
     if schedule_version in {
+        KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+        KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    }:
+        # source+instruction / source identity / instruction only /
+        # unconditional = 80% / 10% / 5% / 5%. Control is absent here.
+        index = _categorical_from_u64(
+            draw,
+            (4_000_000, 4_500_000, 4_750_000, PROB_SCALE),
+            PROB_SCALE,
+        )
+        return (
+            EditConditionPattern.SOURCE_TEXT,
+            EditConditionPattern.SOURCE_IDENTITY,
+            EditConditionPattern.TEXT_ONLY,
+            EditConditionPattern.UNCONDITIONAL,
+        )[index]
+    if schedule_version in {
         UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION,
         UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION,
     }:
@@ -463,6 +537,25 @@ def bernoulli_from_draw(draw: int, probability: float) -> bool:
     return int(draw) < min(threshold, 1 << 64)
 
 
+def ease_present_from_draw(
+    capability: CapabilityId,
+    draw: int,
+    schedule_version: str,
+) -> bool:
+    """Sample independent Ease coverage for the registered control bootstrap."""
+
+    if schedule_version != KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION:
+        return False
+    capability = CapabilityId(capability)
+    if capability == CapabilityId.T2M:
+        probability = 0.25
+    elif capability == CapabilityId.KIMODO_CONTROL:
+        probability = 0.50
+    else:
+        probability = 0.0
+    return bernoulli_from_draw(draw, probability)
+
+
 @dataclass
 class BernoulliIntegrity:
     expected: float = 0.0
@@ -499,6 +592,7 @@ class SamplePlan:
     control_u64: int
     text_drop: bool
     edit_pattern: EditConditionPattern | None
+    ease_present: bool = False
 
 
 @dataclass
