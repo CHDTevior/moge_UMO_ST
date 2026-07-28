@@ -1,0 +1,8 @@
+base_config: hy273_multitask_base.yaml
+
+contract:
+  name: hy273_multitask_r12_rootmask_v1
+  version: hy273_multitask_train_contract_v3_rootmask
+
+control:
+  root_heading_probability: 0.5

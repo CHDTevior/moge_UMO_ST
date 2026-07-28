@@ -1,0 +1,7 @@
+base_config: hy273_multitask_base.yaml
+stage:
+  name: stage_c_consolidate
+  expected_start_step: 400000
+  stop_step: 500000
+  phase_id: 3
+  schedule_version: hy273_multitask_weighted_deficit_v1

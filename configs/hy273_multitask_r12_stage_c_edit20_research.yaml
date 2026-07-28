@@ -1,0 +1,8 @@
+base_config: hy273_multitask_r12_rootmask_base.yaml
+
+stage:
+  name: stage_c_edit20_research
+  expected_start_step: 400000
+  stop_step: 500000
+  phase_id: 3
+  schedule_version: hy273_multitask_weighted_deficit_stagec_fixed_35_45_20_v1

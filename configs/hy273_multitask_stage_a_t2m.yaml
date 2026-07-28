@@ -1,0 +1,7 @@
+base_config: hy273_multitask_base.yaml
+stage:
+  name: stage_a_t2m
+  expected_start_step: 0
+  stop_step: 200000
+  phase_id: 0
+  schedule_version: hy273_multitask_weighted_deficit_v1

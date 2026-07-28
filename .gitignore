@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+
+# Local datasets, caches, checkpoints, and generated artifacts.
+datasets/
+checkpoints/
+outputs/
+logs/
+run_logs/
+eval_runs/
+generation/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.gif
+*.mp4
+
+# External repositories are not vendored. The two small files already present
+# under external_repos/ are explicit scientific test/FK references.
+/assets/
+/glove/
+
+# The interactive demo and MotionCorrection are maintained in another session.
+demo/

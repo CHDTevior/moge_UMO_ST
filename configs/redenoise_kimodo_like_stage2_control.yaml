@@ -1,0 +1,109 @@
+data:
+  data_root: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22
+  text_root: /mnt/afs/mogo_base/datasets/HumanML3D/texts
+  max_frames: 300
+  min_frames: 16
+
+assets:
+  manifest_path: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22/derived_stats/redenoise_kimodo_like_v1/training_assets.json
+  manifest_sha256: ff8da22b41f440931c35a9c1a86291c07c134a25e55a677fc9e95534f3113e84
+  source_manifest_sha256: bc1bb0e8df4e139a99dbe326956b8a16a7f1b58c66a3d9c6509b6a2b6cec3e8c
+  expected_initial_model_sha256: efbdf65ce2adb26a71e87bcae9c9cc55e4260c5523d8495508a0bb669116302a
+
+normalization:
+  motion_stats_dir: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22/derived_stats/redenoise_kimodo_like_v1/full
+  local_root_stats_dir: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22/derived_stats/redenoise_kimodo_like_v1/local_root
+  variance_eps: 0.00001
+  manifest_sha256: 66e31ba1fc75f59074547daa4565124a9625b3740a2f40ebca9574c5065b9b1c
+
+model:
+  architecture: redenoise_kimodo_like
+  prediction_type: x0
+  hidden_dim: 1024
+  num_heads: 8
+  root_depth_double: 3
+  root_depth_single: 6
+  body_depth_double: 3
+  body_depth_single: 6
+  mlp_ratio: 2.0
+  dropout: 0.0
+  detach_root_bridge: true
+
+text:
+  encoder: hy_cache
+  max_text_tokens: 128
+  hytext_cache_dir: /mnt/afs/mogo_base/datasets/HumanML3D/hytext_qwen3_clipL_mlen128
+  hytext_ctxt_dim: 4096
+  hytext_vtxt_dim: 768
+  hytext_max_open_shards: 64
+  hytext_allow_cache_miss: false
+  dropout_prob: 0.1
+
+transform:
+  root_origin_shift: true
+  random_first_heading: true
+
+self_conditioning:
+  enabled: false
+  mode: add_proj
+  train_prob: 0.5
+  scale: 1.0
+
+ema:
+  enabled: true
+  decay: 0.995
+  every: 10
+
+loss:
+  flow: 1.0
+  contact: 0.1
+  control_cont: 0.25
+  # Contact is supervised as an output prior, not exposed as a v1 control mode.
+  control_contact: 0.0
+  clean_cont: 0.0
+  clean_root_vel: 0.01
+  clean_joint_vel: 0.01
+  foot_lock: 0.01
+  semantic_fps: 30.0
+  foot_lock_contact_threshold: 0.5
+  root_heading: 1.0
+  velocity: 1.0
+  representation_mode: semantic_weighted
+  representation_scale: 0.09397019716051493
+  representation_space: velocity
+  velocity_t_eps: 0.05
+  fk_consistency: 0.07
+  fk_consistency_scale_m: 0.05
+  fk_consistency_warmup_steps: 5000
+
+control:
+  training_phase: control
+  curriculum_start_step: 200000
+  curriculum_steps: 200000
+  none_prob: 0.10
+  mixed_prob: 0.25
+  dense_min_fraction: 0.25
+  modes: [none, root_sparse, root_dense, endpoints, fullpose, mixed]
+  endpoint_root_ref_mode: kimodo_hidden_root
+  endpoint_preset: five_point
+  endpoint_subset_mode: random_nonempty
+  include_endpoint_rotations: false
+  max_keyframes: 20
+
+train:
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  max_epochs: 8000
+  max_steps: 400000
+  lr: 0.0001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  time_schedule: logit_normal
+  denoiser_p_mean: -0.8
+  denoiser_p_std: 0.8
+  amp: true
+  amp_dtype: bf16
+  deterministic_trace: true
+  trace_seed: 3407
+  trace_hash_steps: 100

@@ -1,0 +1,65 @@
+{
+  "format": "hy273_r13_edit_objective_pilot_eval_v1",
+  "estimand": "baseline_objective_package_vs_anchored_identity_objective_package",
+  "parent_checkpoint": "outputs/hy273_multitask/hy273_r13_contactflow_controlled_staged_ddp8_20260720_040507/model/step_00400000.pt",
+  "checkpoint_step": 405000,
+  "motionfix_test_manifest": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/test.jsonl",
+  "selection": {
+    "seed_string": "hy273_r13_edit_eval_v1",
+    "static_definition": "mean_global_joint_speed_mps < 0.15",
+    "direction_definition": "sign(target_mean_global_joint_speed_mps - source_mean_global_joint_speed_mps)",
+    "notes": "The known 400K failure probes are included first; remaining IDs are selected by sha256(seed_string:stratum:pair_id)."
+  },
+  "pair_ids_by_stratum": {
+    "dynamic_to_dynamic_decrease": [
+      "002024", "006202", "001473", "004891", "003434", "003385",
+      "002397", "001318", "005255", "000569", "003101", "003201"
+    ],
+    "dynamic_to_dynamic_increase": [
+      "000038", "000472", "002143", "002173", "002111", "002262",
+      "002927", "002681", "003795", "001579", "002560", "003577"
+    ],
+    "dynamic_to_static_decrease": [
+      "003165", "003485", "003896", "003805", "003916", "003685",
+      "002758", "005230"
+    ],
+    "static_to_dynamic_increase": [
+      "005605", "004913", "001886", "007571", "004578", "003887",
+      "001964", "004082"
+    ],
+    "static_to_static_decrease": [
+      "007516", "004900", "004742", "007811", "005121", "007073",
+      "007370", "003731", "003374", "006310", "006767", "007637"
+    ],
+    "static_to_static_increase": [
+      "001627", "007102", "007460", "006005", "007193", "004714",
+      "005660", "006674", "004745", "005471", "007823", "006523"
+    ]
+  },
+  "fixed_t": {
+    "timesteps": [0.05, 0.1, 0.3, 0.6],
+    "yaw_degrees": [0.0, 90.0],
+    "seeds": [20260731, 20260732, 20260733, 20260734],
+    "text_branches": ["correct", "empty", "same_direction_donor", "opposite_direction_donor"],
+    "source_branches": ["correct", "absent", "donor"]
+  },
+  "ode": {
+    "steps": 32,
+    "seeds": [20260731, 20260732, 20260733, 20260734],
+    "source_cfg_scale": 1.0,
+    "edit_cfg_scale": 1.0,
+    "control_cfg_scale": 2.0,
+    "edit_source_baseline": "learned",
+    "primary_rollout": "normal_unified_273_flow",
+    "contact_interventions_are_diagnostic_only": true
+  },
+  "required_checks": [
+    "fixed_t_correct_vs_empty_and_opposite_direction_by_stratum_and_yaw",
+    "ode_false_static_rate_speed_direction_contact_occupancy_and_target_error",
+    "empty_instruction_source_preservation",
+    "blind_side_by_side_edit_gifs_for_all_strata_and_known_failures",
+    "t2m_visual_and_physical_non_degradation",
+    "kimodo_control_raw_adherence_and_physical_non_degradation",
+    "training_nan_gradient_clip_task_mix_timestep_and_throughput"
+  ]
+}

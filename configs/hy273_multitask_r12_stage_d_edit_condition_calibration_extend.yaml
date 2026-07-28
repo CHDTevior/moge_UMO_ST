@@ -1,0 +1,11 @@
+base_config: hy273_multitask_r12_rootmask_base.yaml
+
+training:
+  max_global_step: 550000
+
+stage:
+  name: stage_d_edit_condition_calibration_extend
+  expected_start_step: 510000
+  stop_step: 550000
+  phase_id: 3
+  schedule_version: hy273_multitask_weighted_deficit_stage_d_edit_cfg_then_30pct_v2

@@ -1,0 +1,40 @@
+contract:
+  name: hy273_context_only_adaptation_v2
+
+parent:
+  checkpoint: /mnt/afs/mogeflow-control/outputs/hy273_multitask/hy273_multitask_r12_stagec_edit20_from400k_to500k_ddp8_20260718_052107/model/step_00500000.pt
+  checkpoint_sha256: a08743f752ca166331de8d3b0ac594e4bde2bd04b981ff07d2887d8013c4971f
+  ema_state_sha256: 6841a19d72ccf4b7de127d35292e645867e3b74271ea06ec8d866129a946c7e2
+  selected_weight: ema
+  expected_next_global_step: 500000
+
+adaptation:
+  schedule_version: hy273_multitask_context_only_edit_identity_cfg_v2
+  effective_global_step_offset: 500000
+  max_updates: 10000
+  save_updates: [0, 1000, 5000, 10000]
+  expected_trainable_tensors: 9
+  expected_trainable_parameters: 1134592
+
+optimizer:
+  context_weight_lr: 5.0e-5
+  context_bias_lr: 5.0e-5
+  context_weight_decay: 0.01
+  context_bias_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  gradient_clip: 1.0
+
+ema:
+  decay: 0.995
+  every_context_update: 1
+
+training:
+  seed: 20260719
+  batch_size_per_rank: 16
+  materialize_workers: 4
+  precision: bf16
+  gradient_sync_mode: fixed_bucket
+  gradient_sync_bucket_cap_mb: 100.0
+  log_every: 10
+  output_dir: /mnt/afs/mogeflow-control/outputs/hy273_multitask_context_only

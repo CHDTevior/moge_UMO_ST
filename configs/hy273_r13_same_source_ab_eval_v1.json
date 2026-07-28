@@ -1,0 +1,93 @@
+{
+  "format": "hy273_r13_same_source_instruction_ab_eval_v1",
+  "research_question": "Which gradient-calibrated same-source instruction-ranking bundle is the better candidate for a later time-matched causal test, while preserving held-out Edit fidelity, T2M, and Kimodo-like control?",
+  "parent_checkpoint": "outputs/hy273_multitask/hy273_r13_contactflow_controlled_staged_ddp8_20260720_040507/model/step_00400000.pt",
+  "training": {
+    "arms": [
+      "same_source_hinge_only",
+      "same_source_softplus_only"
+    ],
+    "start_step": 400000,
+    "stop_step": 405000,
+    "world_size_per_arm": 4,
+    "batch_size_per_rank": 32,
+    "global_batch_per_arm": 128,
+    "paired_stream": "same seed, plans, data rows, augmentation, t, noise, source condition, and sibling text",
+    "treatment_difference": "hinge multiplier 1.0 versus temperature-0.01 softplus multiplier 0.575; calibrated to match initial output-gradient RMS within 2.4 percent, not claimed as a pure loss-shape ablation",
+    "checkpoint": "raw and EMA saved at 405000"
+  },
+  "evaluation": {
+    "weight_order": [
+      "raw_primary",
+      "ema_secondary"
+    ],
+    "primary_subset": "held-out target-disjoint exact-same-source sibling groups, deterministically pruned so no exact source/target asset appears in two bootstrap units",
+    "primary_timestep": 0.0,
+    "supportive_timesteps": [0.05, 0.1],
+    "matched_noise_ode_steps": 32,
+    "ode_primary": {
+      "weight_source": "model",
+      "source_cfg_scale": 1.0,
+      "edit_cfg_scale": 1.0,
+      "output": "raw_motion",
+      "noise_seed": 20260722,
+      "metric_subset": "target_disjoint_asset_nonoverlap",
+      "metric_space": "normalized full_273"
+    },
+    "text_branches": [
+      "correct",
+      "same-source sibling",
+      "empty"
+    ],
+    "t2m_physical_guardrail": {
+      "evaluator": "tools/eval_hy273_multitask_t2m_visual16.py",
+      "weight_source": "model",
+      "fixed_prompts": 16,
+      "ode_steps": 32,
+      "text_cfg_scale": 2.0,
+      "seed": 3407,
+      "lower_is_better": [
+        "foot_skate_from_height",
+        "foot_skate_from_pred_contacts",
+        "foot_skate_ratio",
+        "fk_jerk_mps3",
+        "position_channel_jerk_mps3"
+      ],
+      "higher_is_better": ["foot_contact_consistency"]
+    },
+    "control_guardrail": {
+      "evaluator": "tools/eval_hy273_kimodo_v5_contact.py",
+      "weight_source": "model",
+      "cases_per_subtype": 32,
+      "subtypes": 19,
+      "text_regimes": ["withtext", "notext"],
+      "ode_steps": 32,
+      "text_cfg_scale": 2.0,
+      "control_cfg_scale": 2.0,
+      "seed": 3407,
+      "primary_output": "generated_raw",
+      "exact_overwrite_invariant": "torch.equal exact_clamped[mask], observed[mask] for every case"
+    }
+  },
+  "decision_rules": {
+    "edit_success_requires": [
+      "positive parent-relative mean delta in t=0 full-273 assignment_advantage",
+      "positive t=0 full-273 correct_vs_empty_mse_gap",
+      "no more than 5 percent parent-relative degradation in t=0 correct_instruction_mse",
+      "matched-noise ODE32 correct instruction is not worse than empty instruction on mean target MSE",
+      "no more than 5 percent parent-relative degradation in matched-noise raw ODE32 correct_instruction_mse"
+    ],
+    "relative_degradation": "directional (candidate-parent)/max(abs(parent),1e-8), sign-adjusted so positive is worse",
+    "maximum_relative_degradation": 0.05,
+    "t2m_guardrail": "all frozen same-seed raw physical metrics must remain within 5 percent; visual semantics reviewed separately",
+    "control_guardrail": "all frozen raw adherence metrics in both text regimes must remain within 5 percent; exact observed-channel overwrite must pass every case",
+    "selection": "among arms satisfying every guardrail, use the direct paired bootstrap of softplus-minus-hinge held-out t=0 assignment_advantage; select one only if its CI excludes zero, otherwise report both"
+  },
+  "interpretation_limits": [
+    "The 5K pilot selects an instruction-supervision mechanism; it is not a final MotionFix benchmark claim.",
+    "Without a time-matched 405K no-rank arm, parent-relative changes cannot establish that ranking beats ordinary continuation.",
+    "Assignment can improve by worsening sibling-text outputs, so correct-instruction MSE and ODE fidelity are mandatory guardrails.",
+    "t>0 fixed-state results are supportive because target information is present in z_t.",
+    "EMA is secondary because 5K updates are short relative to the EMA horizon."
+  ]
+}

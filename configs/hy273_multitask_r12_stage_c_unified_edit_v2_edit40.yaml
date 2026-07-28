@@ -1,0 +1,8 @@
+base_config: hy273_multitask_r12_stage_c_unified_edit_v2.yaml
+
+stage:
+  name: stage_c_unified_edit_v2_edit40
+  expected_start_step: 450000
+  stop_step: 500000
+  phase_id: 3
+  schedule_version: hy273_multitask_unified_fixed_30_30_40_joint_edit_v1

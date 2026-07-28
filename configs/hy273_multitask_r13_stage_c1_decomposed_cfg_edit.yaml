@@ -1,0 +1,15 @@
+base_config: hy273_multitask_r13_unified273_base.yaml
+
+stage:
+  name: stage_c1_r13_decomposed_cfg_edit
+  expected_start_step: 400000
+  stop_step: 450000
+  phase_id: 3
+  schedule_version: hy273_multitask_unified_fixed_30_40_30_decomposed_cfg_v1
+
+edit_objective:
+  target_x0_scale: 0.05
+  hard_x0_scale: 0.02
+  hard_fraction: 0.20
+  instruction_rank_scale: 0.50
+  instruction_relative_margin: 0.10

@@ -1,0 +1,91 @@
+data:
+  data_root: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22
+  text_root: /mnt/afs/mogo_base/datasets/HumanML3D/texts
+  max_frames: 300
+  min_frames: 16
+
+model:
+  source_dim: 273
+  mask_dim: 273
+  model_in_dim: 546
+  prediction_type: x0
+  hidden_dim: 1024
+  output_dim: 273
+  num_heads: 8
+  depth_double: 6
+  depth_single: 12
+  ff_size: 2048
+  mlp_ratio: 2.0
+  dropout: 0.0
+
+text:
+  encoder: clip
+  clip_path: checkpoints/clip/ViT-B-32.pt
+  clip_version: ViT-B/32
+  max_text_tokens: 50
+  hytext_cache_dir: /mnt/afs/mogo_base/datasets/HumanML3D/hytext_qwen3_clipL_mlen128
+  hytext_ctxt_dim: 4096
+  hytext_vtxt_dim: 768
+  hytext_max_open_shards: 64
+  hytext_allow_cache_miss: false
+  dropout_prob: 0.1
+
+conditioning:
+  use_adaln_time_heading: true
+  use_timestep_prefix_token: false
+  use_heading_prefix_token: false
+
+transform:
+  root_origin_shift: true
+  random_first_heading: true
+
+self_conditioning:
+  enabled: false
+  mode: add_proj
+  train_prob: 0.5
+  use_clamped_clean: true
+  detach: true
+  zero_init_proj: true
+  scale: 1.0
+
+ema:
+  enabled: true
+  decay: 0.995
+  every: 10
+
+loss:
+  flow: 1.0
+  contact: 0.1
+  control_cont: 0.25
+  control_contact: 0.05
+  clean_cont: 0.0
+  clean_root_vel: 0.0
+  clean_joint_vel: 0.0
+  foot_lock: 0.0
+  semantic_fps: 30.0
+  foot_lock_contact_threshold: 0.5
+  root_heading: 1.0
+  velocity: 1.0
+
+control:
+  modes: [none, root, endpoints, fullpose, mixed]
+  endpoint_root_ref_mode: kimodo_hidden_root
+  endpoint_preset: kimodo_ee
+  endpoint_subset_mode: random_nonempty
+  max_keyframes: 8
+
+sampling:
+  num_steps: 32
+  quality_steps: 64
+  gradient_guidance: false
+  postprocess: false
+
+train:
+  batch_size: 16
+  num_workers: 4
+  max_epochs: 4000
+  max_steps: 0
+  lr: 0.0001
+  weight_decay: 0.01
+  amp: true
+  amp_dtype: bf16

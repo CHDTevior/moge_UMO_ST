@@ -1,0 +1,8 @@
+base_config: hy273_multitask_r13_unified273_base.yaml
+
+stage:
+  name: stage_b_r16_fixed_control
+  expected_start_step: 200000
+  stop_step: 400000
+  phase_id: 1
+  schedule_version: hy273_multitask_r16_stage_b_fixed_10_90_0_v1

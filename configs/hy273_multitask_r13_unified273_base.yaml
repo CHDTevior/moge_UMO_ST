@@ -1,0 +1,17 @@
+base_config: hy273_multitask_r12_rootmask_base.yaml
+
+contract:
+  name: hy273_multitask_r13_unified273_v1
+  version: hy273_multitask_train_contract_v4_unified273
+
+data:
+  stats_root: /mnt/afs/mogo_base/datasets/HY273_multitask_v1/derived_stats/hy273_multitask_stats_r13_unified273_v1
+
+flow:
+  contact_protocol: unified_273_clean_flow_v1
+
+loss:
+  # Kimodo gamma_contact=4 relative to continuous weights summing to 35.
+  contact: 0.010739451104058849
+  # Apply the same 4/35 semantic ratio to the continuous control objective.
+  control_contact: 0.02857142857142857

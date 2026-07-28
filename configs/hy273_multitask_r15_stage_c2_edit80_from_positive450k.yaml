@@ -1,0 +1,8 @@
+base_config: hy273_multitask_r13_stage_c1_decomposed_cfg_edit.yaml
+
+stage:
+  name: stage_c2_r15_edit80_from_positive450k
+  expected_start_step: 450000
+  stop_step: 500000
+  phase_id: 3
+  schedule_version: hy273_multitask_unified_fixed_10_10_80_decomposed_cfg_v1

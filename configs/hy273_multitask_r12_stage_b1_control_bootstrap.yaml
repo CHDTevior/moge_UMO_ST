@@ -1,0 +1,8 @@
+base_config: hy273_multitask_r12_rootmask_base.yaml
+
+stage:
+  name: stage_b1_control_bootstrap
+  expected_start_step: 200000
+  stop_step: 250000
+  phase_id: 1
+  schedule_version: hy273_multitask_weighted_deficit_v1

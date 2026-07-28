@@ -1,0 +1,90 @@
+data:
+  data_root: /mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22
+  text_root: /mnt/afs/mogo_base/datasets/HumanML3D/texts
+  max_frames: 300
+  min_frames: 16
+
+model:
+  source_dim: 273
+  mask_dim: 273
+  model_in_dim: 546
+  prediction_type: x0
+  hidden_dim: 1024
+  output_dim: 273
+  num_heads: 8
+  depth_double: 6
+  depth_single: 12
+  ff_size: 2048
+  mlp_ratio: 2.0
+  dropout: 0.0
+
+text:
+  encoder: hy_cache
+  max_text_tokens: 128
+  hytext_cache_dir: /mnt/afs/mogo_base/datasets/HumanML3D/hytext_qwen3_clipL_mlen128
+  hytext_ctxt_dim: 4096
+  hytext_vtxt_dim: 768
+  hytext_max_open_shards: 64
+  hytext_allow_cache_miss: false
+  dropout_prob: 0.1
+
+transform:
+  root_origin_shift: true
+  random_first_heading: true
+
+self_conditioning:
+  enabled: false
+  mode: add_proj
+  train_prob: 0.5
+  scale: 1.0
+
+ema:
+  enabled: true
+  decay: 0.995
+  every: 10
+
+loss:
+  flow: 1.0
+  contact: 0.1
+  control_cont: 0.0
+  control_contact: 0.0
+  clean_cont: 0.0
+  clean_root_vel: 0.01
+  clean_joint_vel: 0.01
+  foot_lock: 0.01
+  semantic_fps: 30.0
+  foot_lock_contact_threshold: 0.5
+  root_heading: 1.0
+  velocity: 1.0
+  representation_mode: semantic_weighted
+  representation_scale: 0.09397019716051493
+  representation_space: velocity
+  velocity_t_eps: 0.05
+  fk_consistency: 0.07
+  fk_consistency_scale_m: 0.05
+  fk_consistency_warmup_steps: 5000
+
+control:
+  modes: [none]
+  endpoint_root_ref_mode: kimodo_hidden_root
+  endpoint_preset: kimodo_ee
+  endpoint_subset_mode: random_nonempty
+  max_keyframes: 8
+
+train:
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  num_workers: 4
+  max_epochs: 4000
+  max_steps: 200000
+  lr: 0.0001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  time_schedule: logit_normal
+  denoiser_p_mean: -0.8
+  denoiser_p_std: 0.8
+  amp: true
+  amp_dtype: bf16
+  deterministic_trace: true
+  trace_seed: 3407
+  trace_hash_steps: 100
