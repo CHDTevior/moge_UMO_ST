@@ -1,0 +1,598 @@
+{
+  "format": "hy273_dynamic_edit_eval_v1",
+  "manifest": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/test.jsonl",
+  "selection_seed": 20260724,
+  "max_frames": 300,
+  "limit_per_category": 16,
+  "eligible_counts": {
+    "faster": 68,
+    "slower": 64,
+    "repeat": 23,
+    "timing": 103
+  },
+  "selected_by_category": {
+    "faster": [
+      "000038",
+      "006277",
+      "006402",
+      "007487",
+      "001509",
+      "003689",
+      "005986",
+      "001434",
+      "002432",
+      "002943",
+      "007193",
+      "007612",
+      "003184",
+      "002660",
+      "007272",
+      "003087"
+    ],
+    "slower": [
+      "007621",
+      "002081",
+      "003401",
+      "002765",
+      "006666",
+      "002620",
+      "005959",
+      "003374",
+      "004587",
+      "006896",
+      "003640",
+      "006964",
+      "001572",
+      "003649",
+      "002680",
+      "000235"
+    ],
+    "repeat": [
+      "006496",
+      "002935",
+      "005605",
+      "005735",
+      "007119",
+      "006713",
+      "007829",
+      "002423",
+      "005566",
+      "001470",
+      "004311",
+      "006056",
+      "003590",
+      "007593",
+      "003434",
+      "005967"
+    ],
+    "timing": [
+      "007102",
+      "005616",
+      "001966",
+      "003180",
+      "007792",
+      "002680",
+      "006633",
+      "002657",
+      "006189",
+      "006897",
+      "006616",
+      "005074",
+      "001470",
+      "007326",
+      "001463",
+      "006797"
+    ]
+  },
+  "selected_pairs": [
+    {
+      "pair_id": "000038",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "move feet faster and punch once faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "000235",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "keep the right hand close to your body and bend only once slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "001434",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it little faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "001463",
+      "categories": [
+        "faster",
+        "timing"
+      ],
+      "instruction": "start earlier and move faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "001470",
+      "categories": [
+        "repeat",
+        "timing"
+      ],
+      "instruction": "start moving your arm earlier and repeat the movement twice",
+      "frames": 120
+    },
+    {
+      "pair_id": "001509",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it little faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "001572",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "do it little slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "001966",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "wait a little more and do the sidestep to the opposite side",
+      "frames": 120
+    },
+    {
+      "pair_id": "002081",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "move slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "002423",
+      "categories": [
+        "repeat",
+        "timing"
+      ],
+      "instruction": "start the arm motion earlier and repeat",
+      "frames": 90
+    },
+    {
+      "pair_id": "002432",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "move slightly faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "002620",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "slow down a little",
+      "frames": 120
+    },
+    {
+      "pair_id": "002657",
+      "categories": [
+        "faster",
+        "timing"
+      ],
+      "instruction": "start squats sooner and do them faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "002660",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do squats faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "002680",
+      "categories": [
+        "slower",
+        "timing"
+      ],
+      "instruction": "delay wave slightly and move arm much slower",
+      "frames": 90
+    },
+    {
+      "pair_id": "002765",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "start bending a little slower then break dance",
+      "frames": 90
+    },
+    {
+      "pair_id": "002935",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "cut down the motion until the hands are in line with the shoulders and repeat the motion",
+      "frames": 90
+    },
+    {
+      "pair_id": "002943",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it a bit faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "003087",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it faster and keep head straight",
+      "frames": 120
+    },
+    {
+      "pair_id": "003180",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "do not turn head left and put right arm to face earlier",
+      "frames": 120
+    },
+    {
+      "pair_id": "003184",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "get up faster and higher",
+      "frames": 120
+    },
+    {
+      "pair_id": "003374",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "put hands slower up and closer to each other do not turn to the sides",
+      "frames": 120
+    },
+    {
+      "pair_id": "003401",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "don't bend elbows and do it slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "003434",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "raise the left arm twice instead of the right arm",
+      "frames": 120
+    },
+    {
+      "pair_id": "003590",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "jump up twice instead of moving feet side to side",
+      "frames": 120
+    },
+    {
+      "pair_id": "003640",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "do it slower",
+      "frames": 90
+    },
+    {
+      "pair_id": "003649",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "keep hand closer to cheek don't move head so much and do is slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "003689",
+      "categories": [
+        "faster",
+        "timing"
+      ],
+      "instruction": "start movement earlier with hands already up and go slightly faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "004311",
+      "categories": [
+        "slower",
+        "repeat"
+      ],
+      "instruction": "jump slower and only four times",
+      "frames": 120
+    },
+    {
+      "pair_id": "004587",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "sit down slower and don't get up",
+      "frames": 120
+    },
+    {
+      "pair_id": "005074",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "bow slightly later",
+      "frames": 120
+    },
+    {
+      "pair_id": "005566",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "keep left arm relaxed and stationary. stiffen the other arm and perform the motion very rapidly twice and then do it horizontally",
+      "frames": 120
+    },
+    {
+      "pair_id": "005605",
+      "categories": [
+        "repeat",
+        "timing"
+      ],
+      "instruction": "don't wait, take a bow immediately and then one more time",
+      "frames": 120
+    },
+    {
+      "pair_id": "005616",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "don't raise arm, bow slightly later",
+      "frames": 120
+    },
+    {
+      "pair_id": "005735",
+      "categories": [
+        "repeat",
+        "timing"
+      ],
+      "instruction": "keep your left arm alongside your body. start with your hand at your ear and bring it down. then repeat the previous movement sooner, but don't clap",
+      "frames": 120
+    },
+    {
+      "pair_id": "005959",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "hold arms lower, move them sideways slower",
+      "frames": 90
+    },
+    {
+      "pair_id": "005967",
+      "categories": [
+        "faster",
+        "repeat",
+        "timing"
+      ],
+      "instruction": "bow earlier , three times noch twice and bit faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "005986",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "bring arms down faster. just keep the arm extended, don't push",
+      "frames": 120
+    },
+    {
+      "pair_id": "006056",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "don't straighten fully, keep acting as if sneaking after getting up. don't crouch down again",
+      "frames": 120
+    },
+    {
+      "pair_id": "006189",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "step to the right sooner",
+      "frames": 120
+    },
+    {
+      "pair_id": "006277",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "006402",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "look straight and drop arms faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "006496",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "start with left arm down and right in the front. tap twice with it",
+      "frames": 120
+    },
+    {
+      "pair_id": "006616",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "start moving arm slightly sooner",
+      "frames": 120
+    },
+    {
+      "pair_id": "006633",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "raise right arm later",
+      "frames": 120
+    },
+    {
+      "pair_id": "006666",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "do the motion slightly slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "006713",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "don't do it towards centre, instead do it once on the left and diagonally right twice",
+      "frames": 120
+    },
+    {
+      "pair_id": "006797",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "lower arms sooner, raise only right arm in the end",
+      "frames": 120
+    },
+    {
+      "pair_id": "006896",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "do it slower",
+      "frames": 120
+    },
+    {
+      "pair_id": "006897",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "lower and raise arms sooner",
+      "frames": 120
+    },
+    {
+      "pair_id": "006964",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "drop slower",
+      "frames": 90
+    },
+    {
+      "pair_id": "007102",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "bring arms down a bit later",
+      "frames": 120
+    },
+    {
+      "pair_id": "007119",
+      "categories": [
+        "repeat",
+        "timing"
+      ],
+      "instruction": "lower arms sooner, raise them again slightly later",
+      "frames": 120
+    },
+    {
+      "pair_id": "007193",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "007272",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "move to the right slightly faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "007326",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "delay the movement to the left a bit",
+      "frames": 120
+    },
+    {
+      "pair_id": "007487",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "do it faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "007593",
+      "categories": [
+        "slower",
+        "repeat"
+      ],
+      "instruction": "lower arms slower, raise them again in the end instead of one arm",
+      "frames": 120
+    },
+    {
+      "pair_id": "007612",
+      "categories": [
+        "faster"
+      ],
+      "instruction": "straighten both arms in the end faster",
+      "frames": 120
+    },
+    {
+      "pair_id": "007621",
+      "categories": [
+        "slower"
+      ],
+      "instruction": "drop hands slower, don't join both hands, instead lift left hand across chest",
+      "frames": 120
+    },
+    {
+      "pair_id": "007792",
+      "categories": [
+        "timing"
+      ],
+      "instruction": "at the end lower arms sooner",
+      "frames": 120
+    },
+    {
+      "pair_id": "007829",
+      "categories": [
+        "repeat"
+      ],
+      "instruction": "don't move both arms, stretch slightly right arm forward twice and left arm once",
+      "frames": 120
+    }
+  ]
+}

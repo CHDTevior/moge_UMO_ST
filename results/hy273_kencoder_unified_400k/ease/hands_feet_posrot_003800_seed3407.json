@@ -1,0 +1,889 @@
+{
+  "checkpoint": "/mnt/afs/mogeflow-control/outputs/hy273_text_fusion/hy273_kencoder_stageBC_ease_t2m10_ctrl70_edit20_ddp8x16_20260728_201555/model/step_00400000.pt",
+  "checkpoint_step": 400000,
+  "control_cfg_scale": 2.0,
+  "control_seed": 3407,
+  "control_subtype": "hands_feet_posrot",
+  "format": "hy273_ease_fixed_noise_sweep_v1",
+  "generated_ease_fk_role": "visible_motion_consistency_diagnostic",
+  "generated_ease_primary_space": "position_channel_centroid",
+  "length": 300,
+  "num_steps": 32,
+  "reference_npy": "/mnt/afs/mogo_base/datasets/HumanML3D/kimodo273_from_hy201_smplx22/motion_data/003800.npy",
+  "rows": [
+    {
+      "axis": "absent",
+      "control_metrics": {
+        "constraint_end_effector": 0.036325614899396896,
+        "constraint_end_effector_rotation_deg": 3.5424320697784424,
+        "foot_contact_consistency": 0.8745819330215454,
+        "foot_skate_from_height": 1.3031197786331177,
+        "foot_skate_from_pred_contacts": 0.13826057314872742,
+        "foot_skate_max_vel": 0.8397470712661743,
+        "foot_skate_ratio": 0.7123745679855347
+      },
+      "generated_ease_fk_normalized": [
+        -0.0022074931766837835,
+        -0.08567824959754944,
+        7.552179336547852,
+        0.43830662965774536,
+        -0.23360100388526917,
+        -6.718037128448486
+      ],
+      "generated_ease_fk_physical": [
+        -0.00043363391887396574,
+        -0.004597170278429985,
+        1.4835294485092163,
+        0.08752046525478363,
+        -0.009348966181278229,
+        -1.341448426246643
+      ],
+      "generated_ease_normalized": [
+        0.0029352291021496058,
+        -0.09012962877750397,
+        7.5537333488464355,
+        0.4411739408969879,
+        -0.23274055123329163,
+        -6.715837001800537
+      ],
+      "generated_ease_physical": [
+        0.000576588383410126,
+        -0.004780196584761143,
+        1.4838347434997559,
+        0.08809300512075424,
+        -0.009313725866377354,
+        -1.3410091400146484
+      ],
+      "name": "ease_absent",
+      "normalized_mae": null,
+      "position_fk_ease_normalized_mae": 0.0028460007160902023,
+      "position_fk_joint_consistency_cm": 0.17375952005386353,
+      "requested_ease_defined": false,
+      "requested_ease_normalized": [
+        0.0,
+        0.026129404082894325,
+        0.0,
+        0.0,
+        -0.00532901007682085,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": null
+    },
+    {
+      "axis": "in",
+      "control_metrics": {
+        "constraint_end_effector": 0.03656935691833496,
+        "constraint_end_effector_rotation_deg": 3.5345935821533203,
+        "foot_contact_consistency": 0.8754180669784546,
+        "foot_skate_from_height": 1.3056155443191528,
+        "foot_skate_from_pred_contacts": 0.13479864597320557,
+        "foot_skate_max_vel": 0.9047272801399231,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.0024757119826972485,
+        -0.08740395307540894,
+        7.548992156982422,
+        0.43776607513427734,
+        -0.23112864792346954,
+        -6.7151780128479
+      ],
+      "generated_ease_fk_physical": [
+        -0.0004863220965489745,
+        -0.004668125417083502,
+        1.4829033613204956,
+        0.087412528693676,
+        -0.00924770999699831,
+        -1.3408775329589844
+      ],
+      "generated_ease_normalized": [
+        0.002826401963829994,
+        -0.09193622320890427,
+        7.5505828857421875,
+        0.44063788652420044,
+        -0.230258509516716,
+        -6.712956428527832
+      ],
+      "generated_ease_physical": [
+        0.0005552106886170805,
+        -0.004854477941989899,
+        1.4832159280776978,
+        0.08798597007989883,
+        -0.009212072938680649,
+        -1.340433955192566
+      ],
+      "name": "ease_in_scale_0",
+      "normalized_mae": 2.504866361618042,
+      "position_fk_ease_normalized_mae": 0.0028981079813092947,
+      "position_fk_joint_consistency_cm": 0.17502577602863312,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 0.0
+    },
+    {
+      "axis": "in",
+      "control_metrics": {
+        "constraint_end_effector": 0.03658454120159149,
+        "constraint_end_effector_rotation_deg": 3.5410187244415283,
+        "foot_contact_consistency": 0.8754180669784546,
+        "foot_skate_from_height": 1.3069220781326294,
+        "foot_skate_from_pred_contacts": 0.1353752613067627,
+        "foot_skate_max_vel": 0.918324887752533,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.002574004465714097,
+        -0.08711302280426025,
+        7.548674583435059,
+        0.4378971755504608,
+        -0.22916264832019806,
+        -6.714869976043701
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005056303925812244,
+        -0.004656163509935141,
+        1.4828410148620605,
+        0.08743871003389359,
+        -0.009167191572487354,
+        -1.3408160209655762
+      ],
+      "generated_ease_normalized": [
+        0.0027493967209011316,
+        -0.09160109609365463,
+        7.5502800941467285,
+        0.44080159068107605,
+        -0.22827626764774323,
+        -6.712653160095215
+      ],
+      "generated_ease_physical": [
+        0.0005400839727371931,
+        -0.004840698558837175,
+        1.483156442642212,
+        0.08801865577697754,
+        -0.009130889549851418,
+        -1.3403733968734741
+      ],
+      "name": "ease_in_scale_0.25",
+      "normalized_mae": 2.1909339427948,
+      "position_fk_ease_normalized_mae": 0.0029040994122624397,
+      "position_fk_joint_consistency_cm": 0.1757424920797348,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.017309879884123802,
+        0.024149596691131592,
+        1.916719675064087,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.0034003055188804865,
+        -8.140329737216234e-05,
+        0.3765151798725128,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 0.25
+    },
+    {
+      "axis": "in",
+      "control_metrics": {
+        "constraint_end_effector": 0.03660524636507034,
+        "constraint_end_effector_rotation_deg": 3.5571277141571045,
+        "foot_contact_consistency": 0.8779264092445374,
+        "foot_skate_from_height": 1.3078505992889404,
+        "foot_skate_from_pred_contacts": 0.1361323446035385,
+        "foot_skate_max_vel": 0.9338061213493347,
+        "foot_skate_ratio": 0.7190635204315186
+      },
+      "generated_ease_fk_normalized": [
+        -0.002746250480413437,
+        -0.08655883371829987,
+        7.548525333404541,
+        0.4381140172481537,
+        -0.22749942541122437,
+        -6.71466588973999
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005394659237936139,
+        -0.004633376840502024,
+        1.482811689376831,
+        0.08748200535774231,
+        -0.009099073708057404,
+        -1.3407752513885498
+      ],
+      "generated_ease_normalized": [
+        0.00262108794413507,
+        -0.09102675318717957,
+        7.5501508712768555,
+        0.4410500228404999,
+        -0.2265426218509674,
+        -6.712446212768555
+      ],
+      "generated_ease_physical": [
+        0.0005148793570697308,
+        -0.004817083477973938,
+        1.4831310510635376,
+        0.08806826174259186,
+        -0.009059887379407883,
+        -1.34033203125
+      ],
+      "name": "ease_in_scale_0.5",
+      "normalized_mae": 1.8780122995376587,
+      "position_fk_ease_normalized_mae": 0.002928880276158452,
+      "position_fk_joint_consistency_cm": 0.1763581484556198,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.034619759768247604,
+        0.048299193382263184,
+        3.833439350128174,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.006800611037760973,
+        0.0009115502471104264,
+        0.7530303597450256,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 0.5
+    },
+    {
+      "axis": "in",
+      "control_metrics": {
+        "constraint_end_effector": 0.03664804622530937,
+        "constraint_end_effector_rotation_deg": 3.5654661655426025,
+        "foot_contact_consistency": 0.8770902752876282,
+        "foot_skate_from_height": 1.308971643447876,
+        "foot_skate_from_pred_contacts": 0.13695526123046875,
+        "foot_skate_max_vel": 0.948572039604187,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.002856011502444744,
+        -0.08602521568536758,
+        7.548367023468018,
+        0.438443660736084,
+        -0.22582145035266876,
+        -6.714531898498535
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005610270891338587,
+        -0.004611436277627945,
+        1.4827805757522583,
+        0.08754783123731613,
+        -0.009030351415276527,
+        -1.3407485485076904
+      ],
+      "generated_ease_normalized": [
+        0.002557919127866626,
+        -0.09053356945514679,
+        7.550012588500977,
+        0.4414067566394806,
+        -0.2248394936323166,
+        -6.7123122215271
+      ],
+      "generated_ease_physical": [
+        0.0005024706479161978,
+        -0.004796805325895548,
+        1.48310387134552,
+        0.08813949674367905,
+        -0.008990135043859482,
+        -1.3403053283691406
+      ],
+      "name": "ease_in_scale_0.75",
+      "normalized_mae": 1.5651278495788574,
+      "position_fk_ease_normalized_mae": 0.002955429954454303,
+      "position_fk_joint_consistency_cm": 0.17703300714492798,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.05192963778972626,
+        0.07244879007339478,
+        5.75015926361084,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.010200915858149529,
+        0.0019045037915930152,
+        1.1295455694198608,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 0.75
+    },
+    {
+      "axis": "in",
+      "control_metrics": {
+        "constraint_end_effector": 0.036702338606119156,
+        "constraint_end_effector_rotation_deg": 3.5693604946136475,
+        "foot_contact_consistency": 0.8812708854675293,
+        "foot_skate_from_height": 1.3102878332138062,
+        "foot_skate_from_pred_contacts": 0.1370193362236023,
+        "foot_skate_max_vel": 0.963367760181427,
+        "foot_skate_ratio": 0.7190635204315186
+      },
+      "generated_ease_fk_normalized": [
+        -0.002986722392961383,
+        -0.08328989893198013,
+        7.547778129577637,
+        0.43893107771873474,
+        -0.22459426522254944,
+        -6.714308261871338
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005867035943083465,
+        -0.004498968832194805,
+        1.482664942741394,
+        0.08764515817165375,
+        -0.008980091661214828,
+        -1.3407038450241089
+      ],
+      "generated_ease_normalized": [
+        0.0024854405783116817,
+        -0.08770885318517685,
+        7.549480438232422,
+        0.44192200899124146,
+        -0.22356250882148743,
+        -6.712090015411377
+      ],
+      "generated_ease_physical": [
+        0.0004882331704720855,
+        -0.004680661950260401,
+        1.482999324798584,
+        0.08824238181114197,
+        -0.008937835693359375,
+        -1.3402609825134277
+      ],
+      "name": "ease_in_scale_1",
+      "normalized_mae": 1.2910057306289673,
+      "position_fk_ease_normalized_mae": 0.0029723932966589928,
+      "position_fk_joint_consistency_cm": 0.17755794525146484,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.06923951953649521,
+        0.09659838676452637,
+        7.666878700256348,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requested_ease_physical": [
+        0.013601222075521946,
+        0.002897457219660282,
+        1.5060607194900513,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 1.0
+    },
+    {
+      "axis": "out",
+      "control_metrics": {
+        "constraint_end_effector": 0.03656935691833496,
+        "constraint_end_effector_rotation_deg": 3.5345935821533203,
+        "foot_contact_consistency": 0.8754180669784546,
+        "foot_skate_from_height": 1.3056155443191528,
+        "foot_skate_from_pred_contacts": 0.13479864597320557,
+        "foot_skate_max_vel": 0.9047272801399231,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.0024757119826972485,
+        -0.08740395307540894,
+        7.548992156982422,
+        0.43776607513427734,
+        -0.23112864792346954,
+        -6.7151780128479
+      ],
+      "generated_ease_fk_physical": [
+        -0.0004863220965489745,
+        -0.004668125417083502,
+        1.4829033613204956,
+        0.087412528693676,
+        -0.00924770999699831,
+        -1.3408775329589844
+      ],
+      "generated_ease_normalized": [
+        0.002826401963829994,
+        -0.09193622320890427,
+        7.5505828857421875,
+        0.44063788652420044,
+        -0.230258509516716,
+        -6.712956428527832
+      ],
+      "generated_ease_physical": [
+        0.0005552106886170805,
+        -0.004854477941989899,
+        1.4832159280776978,
+        0.08798597007989883,
+        -0.009212072938680649,
+        -1.340433955192566
+      ],
+      "name": "ease_out_scale_0",
+      "normalized_mae": 2.504866361618042,
+      "position_fk_ease_normalized_mae": 0.0028981079813092947,
+      "position_fk_joint_consistency_cm": 0.17502577602863312,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -0.0,
+        -0.0
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.0,
+        0.00021825163275934756,
+        0.0
+      ],
+      "scale": 0.0
+    },
+    {
+      "axis": "out",
+      "control_metrics": {
+        "constraint_end_effector": 0.036604687571525574,
+        "constraint_end_effector_rotation_deg": 3.5309715270996094,
+        "foot_contact_consistency": 0.8779264092445374,
+        "foot_skate_from_height": 1.3062514066696167,
+        "foot_skate_from_pred_contacts": 0.13452892005443573,
+        "foot_skate_max_vel": 0.9066612720489502,
+        "foot_skate_ratio": 0.7157190442085266
+      },
+      "generated_ease_fk_normalized": [
+        -0.0025403352919965982,
+        -0.08724842220544815,
+        7.548378944396973,
+        0.4378696084022522,
+        -0.2300415188074112,
+        -6.715004920959473
+      ],
+      "generated_ease_fk_physical": [
+        -0.0004990165471099317,
+        -0.004661730490624905,
+        1.4827829599380493,
+        0.08743320405483246,
+        -0.009203186258673668,
+        -1.3408429622650146
+      ],
+      "generated_ease_normalized": [
+        0.0027589655946940184,
+        -0.09166834503412247,
+        7.549973964691162,
+        0.440746009349823,
+        -0.2291700392961502,
+        -6.712779998779297
+      ],
+      "generated_ease_physical": [
+        0.0005419636727310717,
+        -0.004843463655561209,
+        1.4830962419509888,
+        0.08800756186246872,
+        -0.009167494252324104,
+        -1.3403986692428589
+      ],
+      "name": "ease_out_scale_0.25",
+      "normalized_mae": 2.200805425643921,
+      "position_fk_ease_normalized_mae": 0.0028811742085963488,
+      "position_fk_joint_consistency_cm": 0.17528538405895233,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.08471481502056122,
+        -0.0632341280579567,
+        -1.6743155717849731
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.016915738582611084,
+        -0.002371526090428233,
+        -0.33432504534721375
+      ],
+      "scale": 0.25
+    },
+    {
+      "axis": "out",
+      "control_metrics": {
+        "constraint_end_effector": 0.03664316236972809,
+        "constraint_end_effector_rotation_deg": 3.528937339782715,
+        "foot_contact_consistency": 0.8770902752876282,
+        "foot_skate_from_height": 1.3069822788238525,
+        "foot_skate_from_pred_contacts": 0.13480953872203827,
+        "foot_skate_max_vel": 0.9104307293891907,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.002702847123146057,
+        -0.0869235098361969,
+        7.547906875610352,
+        0.4380128085613251,
+        -0.22877395153045654,
+        -6.714897155761719
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005309398984536529,
+        -0.004648371133953333,
+        1.4826902151107788,
+        0.08746179938316345,
+        -0.009151272475719452,
+        -1.3408215045928955
+      ],
+      "generated_ease_normalized": [
+        0.0026130748447030783,
+        -0.09127151966094971,
+        7.549511909484863,
+        0.44089385867118835,
+        -0.22788825631141663,
+        -6.712658405303955
+      ],
+      "generated_ease_physical": [
+        0.0005133053055033088,
+        -0.004827147349715233,
+        1.4830055236816406,
+        0.08803708106279373,
+        -0.009114998392760754,
+        -1.34037446975708
+      ],
+      "name": "ease_out_scale_0.5",
+      "normalized_mae": 1.8967180252075195,
+      "position_fk_ease_normalized_mae": 0.0028790768701583147,
+      "position_fk_joint_consistency_cm": 0.17559820413589478,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.16942963004112244,
+        -0.1264682561159134,
+        -3.3486311435699463
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.03383147716522217,
+        -0.004961303900927305,
+        -0.6686500906944275
+      ],
+      "scale": 0.5
+    },
+    {
+      "axis": "out",
+      "control_metrics": {
+        "constraint_end_effector": 0.03668756037950516,
+        "constraint_end_effector_rotation_deg": 3.5294301509857178,
+        "foot_contact_consistency": 0.8787625432014465,
+        "foot_skate_from_height": 1.3076579570770264,
+        "foot_skate_from_pred_contacts": 0.1347285360097885,
+        "foot_skate_max_vel": 0.9153423309326172,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.0028855539858341217,
+        -0.08674287796020508,
+        7.547471046447754,
+        0.438204824924469,
+        -0.22740107774734497,
+        -6.714662551879883
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005668303347192705,
+        -0.004640944302082062,
+        1.4826046228408813,
+        0.08750014007091522,
+        -0.009095045737922192,
+        -1.340774655342102
+      ],
+      "generated_ease_normalized": [
+        0.0024481271393597126,
+        -0.0910002738237381,
+        7.549088954925537,
+        0.4410921037197113,
+        -0.22648374736309052,
+        -6.712413311004639
+      ],
+      "generated_ease_physical": [
+        0.000480903428979218,
+        -0.0048159947618842125,
+        1.4829224348068237,
+        0.08807666599750519,
+        -0.009057476185262203,
+        -1.3403254747390747
+      ],
+      "name": "ease_out_scale_0.75",
+      "normalized_mae": 1.59262216091156,
+      "position_fk_ease_normalized_mae": 0.002877139253541827,
+      "position_fk_joint_consistency_cm": 0.17590025067329407,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.25414443016052246,
+        -0.18970239162445068,
+        -5.022946834564209
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.050747212022542953,
+        -0.007551081944257021,
+        -1.0029751062393188
+      ],
+      "scale": 0.75
+    },
+    {
+      "axis": "out",
+      "control_metrics": {
+        "constraint_end_effector": 0.03673331066966057,
+        "constraint_end_effector_rotation_deg": 3.529947280883789,
+        "foot_contact_consistency": 0.8795986771583557,
+        "foot_skate_from_height": 1.3084983825683594,
+        "foot_skate_from_pred_contacts": 0.13513779640197754,
+        "foot_skate_max_vel": 0.9213070869445801,
+        "foot_skate_ratio": 0.717391312122345
+      },
+      "generated_ease_fk_normalized": [
+        -0.0030449237674474716,
+        -0.08634315431118011,
+        7.547052383422852,
+        0.4383832514286041,
+        -0.2259819656610489,
+        -6.7144060134887695
+      ],
+      "generated_ease_fk_physical": [
+        -0.0005981365102343261,
+        -0.004624508786946535,
+        1.4825223684310913,
+        0.08753576874732971,
+        -0.009036925621330738,
+        -1.3407233953475952
+      ],
+      "generated_ease_normalized": [
+        0.0023082976695150137,
+        -0.09053247421979904,
+        7.548681259155273,
+        0.4412764310836792,
+        -0.22503095865249634,
+        -6.712146759033203
+      ],
+      "generated_ease_physical": [
+        0.0004534356703516096,
+        -0.004796760156750679,
+        1.4828423261642456,
+        0.08811347186565399,
+        -0.008997976779937744,
+        -1.340272307395935
+      ],
+      "name": "ease_out_scale_1",
+      "normalized_mae": 1.297788143157959,
+      "position_fk_ease_normalized_mae": 0.0028791429940611124,
+      "position_fk_joint_consistency_cm": 0.17625115811824799,
+      "requested_ease_defined": true,
+      "requested_ease_normalized": [
+        0.0,
+        0.0,
+        0.0,
+        0.3388592600822449,
+        -0.2529365122318268,
+        -6.697262287139893
+      ],
+      "requested_ease_physical": [
+        0.0,
+        -0.0010743568418547511,
+        0.0,
+        0.06766295433044434,
+        -0.01014085952192545,
+        -1.337300181388855
+      ],
+      "scale": 1.0
+    }
+  ],
+  "runtime_encoded_text_rows": 0,
+  "sampling_protocol": {
+    "branch_names": [
+      "joint",
+      "text",
+      "control",
+      "empty"
+    ],
+    "cfg_apply_contacts": true,
+    "contact_feedback": "ode_273d",
+    "contact_init": "unified_273d_state",
+    "contact_protocol": "unified_273_clean_flow_v1",
+    "contact_protocol_version": "hy273_unified_273_clean_flow_v1",
+    "control_cfg_scale": 2.0,
+    "diagnostic_allow_source_absent_edit": false,
+    "edit_cfg_scale": 1.0,
+    "edit_source_baseline": "learned",
+    "has_control": true,
+    "initial_noise_source": "provided_unified_273d",
+    "ode_state_persistent_clamp": false,
+    "ode_steps": 32,
+    "primary_output": "raw_pre_exact_clamp",
+    "route": "generate",
+    "sampling_protocol_version": "hy273_multitask_layered_cfg_x0_v2",
+    "source_cfg_scale": 1.0,
+    "source_fusion_mode": "additive",
+    "text_cfg_scale": 2.0,
+    "text_fusion_mode": "f00",
+    "text_global_conditioning": "llm2vec_tokens_only"
+  },
+  "seed": 3407,
+  "summary": {
+    "control_metrics_mean_across_sweep": {
+      "constraint_end_effector": 0.036606656556779686,
+      "constraint_end_effector_rotation_deg": 3.5421707846901636
+    },
+    "ease_in": {
+      "active_half_normalized_mae": [
+        2.5484485626220703,
+        1.921290397644043,
+        1.296012043952942,
+        0.6707358360290527,
+        0.12281986325979233
+      ],
+      "active_half_normalized_mae_mean": 1.31186134070158,
+      "cross_half_normalized_drift": [
+        0.0,
+        0.0020119776017963886,
+        0.0037733272183686495,
+        0.005511070601642132,
+        0.006872850004583597
+      ],
+      "cross_half_normalized_drift_mean": 0.0036338450852781536,
+      "generated_direction_projection": [
+        7.5485429763793945,
+        7.548243522644043,
+        7.548120498657227,
+        7.547987937927246,
+        7.547491073608398
+      ],
+      "linear_response_slope": -0.000943756103515625,
+      "scales": [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ],
+      "spearman_scale_vs_projection": -0.9999999999999998
+    },
+    "ease_out": {
+      "active_half_normalized_mae": [
+        2.4612843990325928,
+        1.853477120399475,
+        1.2456371784210205,
+        0.6377318501472473,
+        0.04840239882469177
+      ],
+      "active_half_normalized_mae_mean": 1.2493065893650055,
+      "cross_half_normalized_drift": [
+        0.0,
+        0.0006686488050036132,
+        0.0012784089194610715,
+        0.001803031424060464,
+        0.002419736934825778
+      ],
+      "cross_half_normalized_drift_mean": 0.0012339652166701853,
+      "generated_direction_projection": [
+        6.730545520782471,
+        6.7303338050842285,
+        6.730171203613281,
+        6.729883670806885,
+        6.729572296142578
+      ],
+      "linear_response_slope": -0.0009586334228515625,
+      "scales": [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ],
+      "spearman_scale_vs_projection": -0.9999999999999998
+    },
+    "fk_diagnostic": {
+      "generated_position_fk_ease_normalized_mae_max": 0.0029723932966589928,
+      "generated_position_fk_ease_normalized_mae_mean": 0.0029017773922532797,
+      "generated_position_fk_joint_consistency_cm_max": 0.17755794525146484,
+      "generated_position_fk_joint_consistency_cm_mean": 0.1757761389017105,
+      "target_position_fk_ease_normalized_mae": 2.868473529815674e-07
+    }
+  },
+  "sweep_definition": "stats-mean baseline; vary one normalized Ease half along the reference direction while holding the other half at stats mean",
+  "target_ease_fk_normalized": [
+    0.06923949718475342,
+    0.09659990668296814,
+    7.666878700256348,
+    0.33885934948921204,
+    -0.2529364228248596,
+    -6.697262287139893
+  ],
+  "target_ease_fk_physical": [
+    0.013601217418909073,
+    0.0028975196182727814,
+    1.5060607194900513,
+    0.06766296923160553,
+    -0.010140855796635151,
+    -1.337300181388855
+  ],
+  "target_ease_normalized": [
+    0.06923951953649521,
+    0.09659838676452637,
+    7.666878700256348,
+    0.3388592600822449,
+    -0.2529365122318268,
+    -6.697262287139893
+  ],
+  "target_ease_physical": [
+    0.013601222075521946,
+    0.002897457219660282,
+    1.5060607194900513,
+    0.06766295433044434,
+    -0.01014085952192545,
+    -1.337300181388855
+  ],
+  "text": "a person does the cat walk",
+  "text_cfg_scale": 2.0,
+  "weight_source": "ema"
+}

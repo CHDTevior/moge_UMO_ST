@@ -1,0 +1,120 @@
+{
+  "contract": {
+    "name": "hy273_multitask_r13_unified273_v1",
+    "version": "hy273_multitask_train_contract_v4_unified273"
+  },
+  "control": {
+    "curriculum_end_step": 400000,
+    "curriculum_start_step": 200000,
+    "dense_min_fraction": 1.0,
+    "endpoint_preset": "kimodo_ee",
+    "endpoint_subset_mode": "random_nonempty",
+    "include_contact_pattern": true,
+    "include_endpoint_rotations": true,
+    "include_root_ref_for_endpoints": true,
+    "max_sparse_keyframes": 20,
+    "mixed_prob": 0.25,
+    "root_heading_probability": 0.5
+  },
+  "data": {
+    "manifest_dir": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1",
+    "materialize_workers": 4,
+    "max_target_frames": 300,
+    "sort_window_batches": 8,
+    "stats_root": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/derived_stats/hy273_multitask_stats_r13_unified273_v1",
+    "train_manifest": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/train.jsonl",
+    "verify_payload_hash": false
+  },
+  "ease": {
+    "enabled": true,
+    "stats_dir": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/derived_stats/hy273_ease_stats_v1"
+  },
+  "edit_objective": {
+    "hard_fraction": 0.2,
+    "hard_x0_scale": 0.02,
+    "instruction_rank_scale": 0.0,
+    "instruction_relative_margin": 0.1,
+    "target_x0_scale": 0.05
+  },
+  "flow": {
+    "contact_protocol": "unified_273_clean_flow_v1",
+    "prediction_type": "x0",
+    "representation_space": "velocity",
+    "timestep_mean": -0.8,
+    "timestep_schedule": "logit_normal",
+    "timestep_std": 0.8
+  },
+  "loss": {
+    "clean_joint_velocity": 0.01,
+    "clean_root_velocity": 0.01,
+    "contact": 0.010739451104058849,
+    "contact_threshold": 0.5,
+    "control_contact": 0.02857142857142857,
+    "control_continuous": 0.25,
+    "fk_consistency": 0.07,
+    "fk_scale_m": 0.05,
+    "fk_warmup_steps": 5000,
+    "foot_lock": 0.01,
+    "fps": 30.0,
+    "representation_scale": 0.09397019716051493,
+    "semantic_weights": [
+      10.0,
+      2.0,
+      10.0,
+      10.0,
+      3.0
+    ],
+    "velocity_t_eps": 0.05
+  },
+  "model": {
+    "body_depth_double": 3,
+    "body_depth_single": 6,
+    "detach_root_bridge": true,
+    "dropout": 0.0,
+    "hidden_dim": 1024,
+    "mlp_ratio": 2.0,
+    "num_heads": 8,
+    "root_depth_double": 3,
+    "root_depth_single": 6,
+    "self_conditioning": false,
+    "stats_variance_eps": 1e-05
+  },
+  "production": {
+    "asset_preflight_artifact": "/mnt/afs/mogeflow-control/outputs/hy273_multitask/gates/full_asset_preflight_r11_v2.json",
+    "asset_preflight_artifact_sha256": "010bb74124219be811a1ae6caf8e81668e77165e39f3e9dc5150d32005b621cd",
+    "nonregression_artifact": "/mnt/afs/mogeflow-control/outside_doc/HY273_multitask_nonregression_baseline_v1.json",
+    "nonregression_artifact_sha256": "2332badc52da7c603c8550e43e432be43dd0f858e7bc88e62df6160c59db47c0"
+  },
+  "stage": {
+    "expected_start_step": 250000,
+    "name": "stage_bc_kencoder_ease_control",
+    "phase_id": 2,
+    "schedule_version": "hy273_kencoder_stage_bc_fixed_10_70_20_ease_v1",
+    "stop_step": 400000
+  },
+  "text": {
+    "cache_dir": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/hytext_qwen3_clipL_profile_v2",
+    "ctxt_dim": 4096,
+    "encoder": "hy_cache",
+    "max_open_shards": 64,
+    "max_tokens": 128,
+    "strict_cache": true,
+    "vtxt_dim": 768
+  },
+  "training": {
+    "archive_every": 50000,
+    "batch_size_per_rank": 16,
+    "ema_decay": 0.995,
+    "ema_every": 10,
+    "gradient_clip": 1.0,
+    "gradient_sync_bucket_cap_mb": 100.0,
+    "gradient_sync_mode": "fixed_bucket",
+    "latest_every": 10000,
+    "log_every": 20,
+    "max_global_step": 500000,
+    "output_dir": "/mnt/afs/mogeflow-control/outputs/hy273_multitask",
+    "precision": "bf16",
+    "seed": 20260715,
+    "weight_decay": 0.01
+  }
+}

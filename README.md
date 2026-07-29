@@ -6,11 +6,13 @@ Text-to-Motion, Kimodo-like Control, and Motion Editing model.
 This repository is a research snapshot. It contains model, data-loader,
 training, sampling, evaluation, configuration, test, and experiment-document
 code. It intentionally does not contain datasets, text caches, model weights,
-generated results, external repositories, or the interactive demo.
+large generated arrays/media, external repositories, or the interactive demo.
+Compact experiment summaries required for scientific review are kept under
+`results/`.
 
 ## Current status
 
-Status date: 2026-07-28.
+Status date: 2026-07-29.
 
 | Capability | Implemented in code | Included in current K-Encoder training |
 |---|---:|---:|
@@ -39,24 +41,30 @@ Stage-BE: 200K -> 250K, T2M / Control / Edit = 60% / 0% / 40%
 Stage-BC: 250K -> 400K, T2M / Control / Edit = 10% / 70% / 20%
 ```
 
-Stage-BE established Motion Editing while replaying T2M. Stage-BC adds
+Stage-BE established Motion Editing while replaying T2M. Stage-BC added
 Kimodo-like Control and physical 6D Ease conditioning while retaining 20% Edit
 replay. Ease is independently present for 25% of T2M and 50% of Control
 samples, and is forbidden on Edit samples.
 
-The current Stage-BC parent and run remain local and are not part of this
-repository:
+Stage-BC completed at 400K. The checkpoint remains local and is not part of
+this repository:
 
 ```text
 /mnt/afs/mogeflow-control/outputs/hy273_text_fusion/
-hy273_kencoder_stageBE_t2m60_edit40_ddp8x16_20260728_131901/
-model/step_00250000.pt
-
-/mnt/afs/mogeflow-control/outputs/hy273_text_fusion/
-hy273_kencoder_stageBC_ease_t2m10_ctrl70_edit20_ddp8x16_20260728_201555
+hy273_kencoder_stageBC_ease_t2m10_ctrl70_edit20_ddp8x16_20260728_201555/
+model/step_00400000.pt
 ```
 
-The active Stage-BC launcher is:
+Final evidence status:
+
+```text
+Training health: PASS
+Control:         established, with an endpoint-position trade-off
+Motion Editing:  mixed/inconclusive from 250K to 400K
+Ease:            condition path active, not yet reliable
+```
+
+The Stage-BC launcher is:
 
 ```bash
 bash scripts/launch/train_hy273_kencoder_stage_bc_ease_control_ddp8.sh
@@ -68,6 +76,9 @@ archives every 50K, and stops at 400K.
 
 ## Key documents
 
+- [Unified 400K final evaluation](docs/HY273_KENCODER_UNIFIED_400K_FINAL_EVALUATION_CN_20260729.md)
+- [Compact 400K result bundle](results/hy273_kencoder_unified_400k/README.md)
+- [Final GPT-5.6 scientific review](docs/HY273_KENCODER_400K_GPT56_FINAL_REVIEW_CN.md)
 - [Current T2M/Edit/Control architecture and training design](docs/CURRENT_T2M_EDIT_CONTROL_DESIGN_CN.md)
 - [K-Encoder Stage-A 200K results](docs/KENCODER_STAGE_A_200K_RESULTS_CN.md)
 - [Ease/Control implementation plan](docs/HY273_EASE_CONTROL_IMPLEMENTATION_PLAN_CN.md)
