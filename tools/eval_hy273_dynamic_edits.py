@@ -31,6 +31,7 @@ from models.raw_motion.hy273_slices import (
     reconstruct_global_joints_from_features,
 )
 from sample_hy273_multitask import (
+    create_model_from_checkpoint,
     make_edit_condition,
     normalizer_from_checkpoint,
     sample_hy273_multitask_ode,
@@ -39,9 +40,6 @@ from tools.render_hy273_edit_same_source_comparison import (
     joints as render_joints,
     render,
 )
-from train_hy273_multitask import create_model_from_checkpoint
-
-
 DEFAULT_MANIFEST = Path(
     "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/"
     "hy273_multitask_v1/test.jsonl"
@@ -697,15 +695,19 @@ def aggregate(args: argparse.Namespace) -> None:
         for label in labels
         if (label, "000038") in by_key
     }
-    known_pair_summary = {
-        "instruction": next(iter(known_pair.values()))["instruction"],
-        "source": next(iter(known_pair.values()))["metrics"]["source"],
-        "target": next(iter(known_pair.values()))["metrics"]["target"],
-        "predictions": {
-            label: record["metrics"]["prediction"]
-            for label, record in known_pair.items()
-        },
-    }
+    if known_pair:
+        reference_pair = next(iter(known_pair.values()))
+        known_pair_summary = {
+            "instruction": reference_pair["instruction"],
+            "source": reference_pair["metrics"]["source"],
+            "target": reference_pair["metrics"]["target"],
+            "predictions": {
+                label: record["metrics"]["prediction"]
+                for label, record in known_pair.items()
+            },
+        }
+    else:
+        known_pair_summary = None
 
     render_ids: list[str] = []
     for category, pair_ids in selection["selected_by_category"].items():

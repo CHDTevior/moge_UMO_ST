@@ -12,3 +12,5 @@ class RawTextCondition:
     tokens: torch.Tensor
     pooled: torch.Tensor
     padding_mask: torch.Tensor
+    local_tokens: torch.Tensor | None = None
+    local_padding_mask: torch.Tensor | None = None

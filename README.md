@@ -12,17 +12,50 @@ Compact experiment summaries required for scientific review are kept under
 
 ## Current status
 
-Status date: 2026-07-29.
+Status date: 2026-08-03.
 
-| Capability | Implemented in code | Included in current K-Encoder training |
+| Capability | Implemented in code | Included in FullText-Reaction V1 |
 |---|---:|---:|
 | Text-to-Motion | yes | yes |
-| Kimodo-like Control | yes | yes |
+| Kimodo-like Control | yes | no, retained in the prior baseline |
 | Motion Editing | yes | yes |
-| Ease-in/Ease-out conditioning | yes | yes |
-| Edit + Control composition | yes | implemented, not active in Stage-BC |
+| Actor-conditioned Reaction | yes | yes |
+| Ease-in/Ease-out conditioning | yes | no |
+| Edit + Control composition | yes | no |
 
-The selected base model is **K-Encoder Stage-A 200K**:
+### FullText-Reaction V1
+
+The latest completed experiment uses one shared model for T2M, Motion Editing,
+and actor-conditioned Reaction:
+
+```text
+0 -> 100K:   T2M = 100%
+100K -> 350K: T2M / Edit / Reaction = 30% / 35% / 35%
+text:         LLM2Vec sentence token + variable-length contextual tokens
+text fusion:  tokens participate in the main MMDiT stream
+reaction:     observed actor is an independent source-token block
+prediction:   clean x0, velocity-space base objective
+training:     DDP8, bf16, 50K archived checkpoints
+```
+
+The default unified checkpoint is 300K. The 350K checkpoint is preferred when
+Reaction or T2M FID is the only priority. Both remain local and are not stored
+in Git:
+
+```text
+/mnt/afs/mogeflow-control/outputs/hy273_unified_reaction/
+hy273_unified_fulltext_reaction_v1_20260801_0315/model/
+step_00300000.pt
+step_00350000.pt
+```
+
+Training is intentionally stopped at 350K under this recipe: Reaction has
+mostly plateaued, while stronger Edit response is accompanied by increasing
+jerk. See the final report linked below before extending this run.
+
+### Prior K-Encoder Control baseline
+
+The prior selected base model is **K-Encoder Stage-A 200K**:
 
 ```text
 conditioning architecture: llm2vec_flux
@@ -76,6 +109,7 @@ archives every 50K, and stops at 400K.
 
 ## Key documents
 
+- [FullText-Reaction 200K-350K final evaluation](docs/HY273_UNIFIED_FULLTEXT_REACTION_200K_350K_FINAL_REPORT_CN_20260803.md)
 - [Unified 400K final evaluation](docs/HY273_KENCODER_UNIFIED_400K_FINAL_EVALUATION_CN_20260729.md)
 - [Compact 400K result bundle](results/hy273_kencoder_unified_400k/README.md)
 - [Final GPT-5.6 scientific review](docs/HY273_KENCODER_400K_GPT56_FINAL_REVIEW_CN.md)
@@ -95,6 +129,7 @@ archives every 50K, and stops at 400K.
 
 ```text
 train_hy273_multitask.py       shared training entry
+train_hy273_unified_actor.py   T2M/Edit/Reaction curriculum trainer
 sample_hy273_multitask.py      T2M/Control/Edit ODE sampler and layered CFG
 data/                          manifest dataset, paired transforms, task scheduler
 models/raw_motion/             HY273 model, constraints, losses, metrics

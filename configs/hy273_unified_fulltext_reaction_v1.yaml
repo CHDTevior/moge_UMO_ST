@@ -1,0 +1,110 @@
+experiment:
+  name: hy273_unified_fulltext_reaction_v1
+
+data:
+  paired_task: reaction
+  multitask_train_manifest: /mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/train.jsonl
+  reaction_root: /mnt/afs/mogo_base/datasets/InteractionK273/interx
+  stats_root: /mnt/afs/mogo_base/datasets/HY273_unified_reaction_v1/derived_stats/t2m30_edit35_reaction35
+  max_target_frames: 300
+  interaction_exclude_overlength: true
+  materialize_workers: 4
+  sort_window_batches: 8
+
+text:
+  encoder: llm2vec_cache
+  cache_dir: /mnt/afs/mogo_base/datasets/HY273_unified_actor_v1/llm2vec_llama3_8b_profile_interaction_v1
+  context_cache_dir: /mnt/afs/mogo_base/datasets/HY273_unified_actor_v1/llm2vec_llama3_8b_context_profile_interaction_v1
+  embedding_dim: 4096
+  max_open_shards: 64
+  context_max_open_shards: 16
+  strict_cache: true
+
+normalization:
+  normalize_contacts: true
+  variance_eps: 1.0e-5
+
+model:
+  hidden_dim: 1024
+  num_heads: 8
+  root_depth_double: 3
+  root_depth_single: 6
+  body_depth_double: 3
+  body_depth_single: 6
+  mlp_ratio: 2.0
+  dropout: 0.0
+  detach_root_bridge: true
+  text_global_conditioning: llm2vec_tokens_only
+  text_fusion_mode: f00
+  text_token_sequence: sentence_plus_context
+  local_text_cross_attention: false
+  source_fusion_mode: token_block
+  actor_exchange_dim: 256
+  actor_exchange_heads: 4
+
+flow:
+  prediction_type: x0
+  loss_space: velocity_mse
+  timestep_schedule: logit_normal
+  timestep_mean: -0.8
+  timestep_std: 0.8
+
+loss:
+  representation_scale: 0.09397019716051493
+  contact: 0.010739451104058849
+  clean_root_velocity: 0.01
+  clean_joint_velocity: 0.01
+  foot_lock: 0.01
+  fk_consistency: 0.07
+  fk_warmup_steps: 5000
+  fk_scale_m: 0.05
+  velocity_t_eps: 0.05
+  fps: 30.0
+  contact_threshold: 0.5
+
+edit_loss:
+  target_x0: 0.05
+  hard_x0: 0.02
+  hard_fraction: 0.20
+  instruction_ranking: 0.0
+
+reaction_loss:
+  relative_root: 0.02
+  relative_heading: 0.01
+  joint_distance: 0.01
+  close_joint_vector: 0.01
+  root_scale_m: 0.25
+  distance_scale_m: 0.10
+  close_vector_scale_m: 0.05
+  distance_gt_threshold_m: 1.0
+  close_gt_threshold_m: 0.20
+  min_flow_t: 0.20
+
+schedule:
+  segments:
+    - {start: 0, end: 100000, t2m: 100, edit: 0, reaction: 0}
+    - {start: 100000, end: 200000, t2m: 30, edit: 35, reaction: 35}
+
+training:
+  seed: 20260801
+  world_size: 8
+  batch_size_t2m_edit_per_rank: 16
+  batch_size_edit_per_rank: 8
+  batch_size_reaction_per_rank: 8
+  precision: bf16
+  stage_a_base_lr: 1.0e-4
+  stage_b_base_lr: 5.0e-5
+  stage_a_adaptation_lr: 0.0
+  stage_b_adaptation_lr: 1.0e-4
+  weight_decay: 0.01
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+  gradient_clip: 1.0
+  ema_decay: 0.995
+  ema_every: 10
+  log_every: 20
+  latest_every: 10000
+  archive_every: 50000
+  ddp_bucket_cap_mb: 100.0
+  output_dir: /mnt/afs/mogeflow-control/outputs/hy273_unified_reaction
+  max_global_step: 200000

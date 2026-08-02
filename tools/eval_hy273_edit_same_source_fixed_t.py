@@ -7,6 +7,7 @@ import argparse
 from collections import defaultdict
 from itertools import combinations
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Iterable
@@ -19,10 +20,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.raw_motion.flow_schedule import build_unified_273_flow_state
+from models.raw_motion.hy273_motionfix_metrics import evaluate_motionfix_internal_case
 from models.raw_motion.hy273_slices import CONTACT_SLICE, CONT_DIM, DIM_HY273
 from sample_hy273_multitask import (
+    create_model_from_checkpoint,
     normalizer_from_checkpoint,
     sample_hy273_multitask_ode,
+)
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT as UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+    validate_config as validate_unified_actor_config,
 )
 from tools.diagnose_hy273_r13_edit_fixed_t import load_k273, to_gauge
 from tools.overfit_hy273_edit_instruction_pairs import (
@@ -31,7 +38,7 @@ from tools.overfit_hy273_edit_instruction_pairs import (
     collate_groups,
     paired_assignment_metrics,
 )
-from train_hy273_multitask import create_model_from_checkpoint, repeat_condition_batch
+from train_hy273_multitask import repeat_condition_batch
 
 
 DEFAULT_MANIFEST = Path(
@@ -48,7 +55,35 @@ COMPARISON_METRICS = (
     "empty_instruction_mse",
     "correct_vs_empty_mse_gap",
     "correct_vs_empty_effect_rms",
+    "source_copy_mse",
+    "correct_vs_source_copy_mse_gain",
 )
+UNIFIED_SCIENTIFIC_CONFIG_KEYS = (
+    "data",
+    "text",
+    "normalization",
+    "model",
+    "flow",
+    "loss",
+    "edit_loss",
+    "interaction_loss",
+    "reaction_loss",
+)
+
+
+def unified_scientific_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Project out run-control fields that may change during same-run continuation."""
+
+    return {key: config.get(key) for key in UNIFIED_SCIENTIFIC_CONFIG_KEYS}
+
+
+def same_variance_eps(left: float, right: float) -> bool:
+    return math.isclose(
+        float(left),
+        float(right),
+        rel_tol=1e-7,
+        abs_tol=1e-12,
+    )
 
 
 def parse_csv(value: str) -> tuple[str, ...]:
@@ -318,8 +353,43 @@ def aggregate_group_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "empty_instruction_mse",
                 "correct_vs_empty_mse_gap",
                 "correct_vs_empty_effect_rms",
+                "source_copy_mse",
+                "correct_vs_source_copy_mse_gain",
             )
         }
+    return output
+
+
+def aggregate_physical_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        raise ValueError("Cannot aggregate empty physical Edit records")
+    output: dict[str, Any] = {}
+    for branch in sorted({str(record["branch"]) for record in records}):
+        branch_records = [
+            record["metrics"] for record in records if record["branch"] == branch
+        ]
+        metric_names = sorted(
+            {
+                key
+                for record in branch_records
+                for key, value in record.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        )
+        output[branch] = {
+            key: float(
+                np.mean(
+                    [
+                        float(record[key])
+                        for record in branch_records
+                        if record.get(key) is not None
+                    ]
+                )
+            )
+            for key in metric_names
+            if any(record.get(key) is not None for record in branch_records)
+        }
+        output[branch]["cases"] = len(branch_records)
     return output
 
 
@@ -345,6 +415,7 @@ def evaluate_model(
             indices = tuple(range(start, min(start + groups_per_batch, len(groups))))
             batch = collate_groups(groups, indices, device=device)
             target_norm = normalizer.normalize(batch["target"])
+            source_norm = normalizer.normalize(batch["source"])
             t = torch.full(
                 (target_norm.shape[0],),
                 float(timestep),
@@ -437,12 +508,16 @@ def evaluate_model(
                 correct_vs_empty_effect = _masked_mse_per_row(
                     correct, empty, batch["valid"], block
                 ).sqrt()
+                source_copy_mse = _masked_mse_per_row(
+                    source_norm, target_norm, batch["valid"], block
+                )
                 row_metrics[space] = (
                     correct_mse,
                     swapped_mse,
                     text_effect,
                     empty_mse,
                     correct_vs_empty_effect,
+                    source_copy_mse,
                 )
             for local_index, (correct_record, swapped_record) in enumerate(
                 zip(correct_rows, swapped_rows)
@@ -461,10 +536,14 @@ def evaluate_model(
                         text_effect,
                         empty_mse,
                         correct_vs_empty_effect,
+                        source_copy_mse,
                     ) = row_metrics[space]
                     own_correct = float(correct_mse[first : first + 2].mean().item())
                     own_swapped = float(swapped_mse[first : first + 2].mean().item())
                     own_empty = float(empty_mse[first : first + 2].mean().item())
+                    own_source_copy = float(
+                        source_copy_mse[first : first + 2].mean().item()
+                    )
                     record["spaces"][space] = {
                         "correct_instruction_mse": own_correct,
                         "swapped_instruction_mse": own_swapped,
@@ -486,6 +565,10 @@ def evaluate_model(
                         "correct_vs_empty_mse_gap": own_empty - own_correct,
                         "correct_vs_empty_effect_rms": float(
                             correct_vs_empty_effect[first : first + 2].mean().item()
+                        ),
+                        "source_copy_mse": own_source_copy,
+                        "correct_vs_source_copy_mse_gain": (
+                            own_source_copy - own_correct
                         ),
                     }
                 group_records.append(record)
@@ -530,6 +613,7 @@ def evaluate_model_ode(
         raise RuntimeError("The R13 ODE probe requires unified 273D flow")
     model.eval()
     group_records: list[dict[str, Any]] = []
+    physical_records: list[dict[str, Any]] = []
     for start in range(0, len(groups), groups_per_batch):
         indices = tuple(range(start, min(start + groups_per_batch, len(groups))))
         batch = collate_groups(groups, indices, device=device)
@@ -555,7 +639,38 @@ def evaluate_model_ode(
             )
             branch_outputs[branch_name] = sampled.raw_motion
 
+        for row_index in range(len(batch["pair_ids"])):
+            frames = int(batch["target_lengths"][row_index].item())
+            pair_start = row_index - row_index % 2
+            group_pair_ids = sorted(
+                str(value)
+                for value in batch["pair_ids"][pair_start : pair_start + 2]
+            )
+            target = batch["target"][row_index, :frames]
+            source = batch["source"][row_index, :frames]
+            physical_branches = {
+                **{
+                    name: value[row_index, :frames]
+                    for name, value in branch_outputs.items()
+                },
+                "source_copy": source,
+            }
+            for branch_name, prediction in physical_branches.items():
+                physical_records.append(
+                    {
+                        "group_pair_ids": group_pair_ids,
+                        "pair_id": str(batch["pair_ids"][row_index]),
+                        "branch": branch_name,
+                        "metrics": evaluate_motionfix_internal_case(
+                            prediction,
+                            target,
+                            source,
+                        ),
+                    }
+                )
+
         target_norm = normalizer.normalize(batch["target"])
+        source_norm = normalizer.normalize(batch["source"])
         output_norm = {
             name: normalizer.normalize(value)
             for name, value in branch_outputs.items()
@@ -602,12 +717,16 @@ def evaluate_model_ode(
                 batch["valid"],
                 block,
             ).sqrt()
+            source_copy_mse = _masked_mse_per_row(
+                source_norm, target_norm, batch["valid"], block
+            )
             row_metrics[space] = (
                 correct_mse,
                 sibling_mse,
                 correct_vs_sibling_effect,
                 empty_mse,
                 correct_vs_empty_effect,
+                source_copy_mse,
             )
 
         for local_index, (correct_record, sibling_record) in enumerate(
@@ -627,10 +746,14 @@ def evaluate_model_ode(
                     sibling_effect,
                     empty_mse,
                     empty_effect,
+                    source_copy_mse,
                 ) = row_metrics[space]
                 own_correct = float(correct_mse[first : first + 2].mean().item())
                 own_sibling = float(sibling_mse[first : first + 2].mean().item())
                 own_empty = float(empty_mse[first : first + 2].mean().item())
+                own_source_copy = float(
+                    source_copy_mse[first : first + 2].mean().item()
+                )
                 record["spaces"][space] = {
                     "correct_instruction_mse": own_correct,
                     "swapped_instruction_mse": own_sibling,
@@ -653,12 +776,18 @@ def evaluate_model_ode(
                     "correct_vs_empty_effect_rms": float(
                         empty_effect[first : first + 2].mean().item()
                     ),
+                    "source_copy_mse": own_source_copy,
+                    "correct_vs_source_copy_mse_gain": (
+                        own_source_copy - own_correct
+                    ),
                 }
             group_records.append(record)
 
     return {
         "aggregate": aggregate_group_records(group_records),
         "groups": group_records,
+        "physical_aggregate": aggregate_physical_records(physical_records),
+        "physical_records": physical_records,
         "protocol": {
             "ode_steps": int(num_steps),
             "source_cfg_scale": float(source_cfg_scale),
@@ -718,6 +847,7 @@ def _better_direction(metric: str) -> str:
         "text_effect_rms",
         "correct_vs_empty_effect_rms",
         "empty_instruction_mse",
+        "source_copy_mse",
     }:
         return "diagnostic_two_sided"
     return "positive"
@@ -836,9 +966,11 @@ def validate_checkpoint_systems(
     if labels != set(expectations):
         raise ValueError("Checkpoint labels and system expectations must match exactly")
     metadata = []
+    unified_scientific_state: list[dict[str, Any]] = []
     for label, path in checkpoints:
         checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
         config = checkpoint.get("config", {})
+        checkpoint_format = str(checkpoint.get("format", ""))
         runtime = checkpoint.get("runtime_identity", {})
         treatment = runtime.get("research_overrides", {}).get(
             "research_treatment", {}
@@ -846,6 +978,73 @@ def validate_checkpoint_systems(
         expected_step, expected_treatment = expectations[label]
         if int(checkpoint.get("next_global_step", -1)) != int(expected_step):
             raise RuntimeError(f"{label} is not step {expected_step}")
+        if weight_source not in checkpoint:
+            raise RuntimeError(f"{label} has no {weight_source} weights")
+        if checkpoint_format == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+            if not isinstance(config, dict):
+                raise RuntimeError(f"{label} has no resolved unified-actor config")
+            validate_unified_actor_config(config)
+            normalization = checkpoint.get("normalization")
+            if not isinstance(normalization, dict) or not bool(
+                normalization.get("normalize_contacts", False)
+            ):
+                raise RuntimeError(f"{label} does not normalize all 273 channels")
+            normalizer = checkpoint.get("normalizer")
+            if not isinstance(normalizer, dict) or not {
+                "mean",
+                "std",
+                "variance_eps",
+            } <= set(normalizer):
+                raise RuntimeError(f"{label} has no complete normalizer state")
+            try:
+                config_variance_eps = float(config["normalization"]["variance_eps"])
+                outer_variance_eps = float(normalization["variance_eps"])
+                state_variance_eps = float(
+                    torch.as_tensor(normalizer["variance_eps"]).item()
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"{label} has malformed variance-epsilon metadata"
+                ) from error
+            if not (
+                same_variance_eps(config_variance_eps, outer_variance_eps)
+                and same_variance_eps(outer_variance_eps, state_variance_eps)
+            ):
+                raise RuntimeError(
+                    f"{label} has inconsistent variance_eps across config, "
+                    "normalization metadata, and normalizer state"
+                )
+            resolved_normalizer = normalizer_from_checkpoint(
+                checkpoint, torch.device("cpu")
+            )
+            run_name = str(checkpoint.get("run_name", "")).strip()
+            if not run_name:
+                raise RuntimeError(f"{label} has no unified-actor run_name")
+            unified_scientific_state.append(
+                {
+                    "label": label,
+                    "run_name": run_name,
+                    "config": unified_scientific_config(config),
+                    "mean": resolved_normalizer.mean.cpu(),
+                    "std": resolved_normalizer.std.cpu(),
+                    "variance_eps": resolved_normalizer.variance_eps,
+                }
+            )
+            metadata.append(
+                {
+                    "label": label,
+                    "path": str(path),
+                    "step": int(checkpoint["next_global_step"]),
+                    "format": checkpoint_format,
+                    "treatment": None,
+                    "expected_treatment_label": expected_treatment,
+                    "comparison_scope": "within_run_training_stage",
+                    "run_name": run_name,
+                    "parent": None,
+                }
+            )
+            del checkpoint
+            continue
         if config.get("contract", {}).get("name") != "hy273_multitask_r13_unified273_v1":
             raise RuntimeError(f"{label} is not an R13 unified-273 checkpoint")
         if (
@@ -853,27 +1052,57 @@ def validate_checkpoint_systems(
             != "unified_273_clean_flow_v1"
         ):
             raise RuntimeError(f"{label} uses the wrong contact-flow protocol")
-        if weight_source not in checkpoint:
-            raise RuntimeError(f"{label} has no {weight_source} weights")
         actual_treatment = str(treatment.get("name", ""))
         if actual_treatment != expected_treatment:
             raise RuntimeError(
                 f"{label} treatment is {actual_treatment!r}, expected "
                 f"{expected_treatment!r}"
             )
+        immediate_parent = runtime.get("immediate_resume_parent") or {}
+        if not isinstance(immediate_parent, dict):
+            raise RuntimeError(f"{label} has malformed immediate resume parent")
         metadata.append(
             {
                 "label": label,
                 "path": str(path),
                 "step": int(checkpoint["next_global_step"]),
+                "format": checkpoint_format,
                 "treatment": actual_treatment,
-                "parent": runtime.get("immediate_resume_parent", {}).get(
-                    "checkpoint"
-                ),
+                "parent": immediate_parent.get("checkpoint"),
             }
         )
         del checkpoint
-    trained = [row for row in metadata if row["treatment"]]
+    if unified_scientific_state:
+        if len(unified_scientific_state) != len(checkpoints):
+            raise RuntimeError(
+                "Mixed legacy/unified comparisons are not supported by this "
+                "controlled same-source evaluator"
+            )
+        reference = unified_scientific_state[0]
+        for row in unified_scientific_state[1:]:
+            if row["run_name"] != reference["run_name"]:
+                raise RuntimeError(
+                    "Unified checkpoints must belong to the same training run"
+                )
+            if row["config"] != reference["config"]:
+                raise RuntimeError(
+                    "Unified checkpoints have different resolved scientific configs"
+                )
+            if (
+                not same_variance_eps(
+                    row["variance_eps"], reference["variance_eps"]
+                )
+                or not torch.equal(row["mean"], reference["mean"])
+                or not torch.equal(row["std"], reference["std"])
+            ):
+                raise RuntimeError(
+                    "Unified checkpoints use different normalizer coordinates"
+                )
+        return metadata
+    # A named default recipe (for example ``formal_default``) can still be the
+    # untreated fork checkpoint. Lineage is determined by resume ancestry, not
+    # by whether the research recipe happens to have a non-empty name.
+    trained = [row for row in metadata if row["parent"] is not None]
     parent_values = {row["parent"] for row in trained}
     if len(trained) > 1 and (None in parent_values or len(parent_values) != 1):
         if not allow_matched_continuations or None in parent_values:
@@ -928,12 +1157,15 @@ def validate_checkpoint_systems(
                 ).get("research_treatment", {})
                 parent_treatment_name = str(parent_treatment.get("name", ""))
                 lineage_steps.append(parent_step)
-                next_parent = parent_runtime.get(
-                    "immediate_resume_parent", {}
-                ).get("checkpoint")
+                immediate_parent = parent_runtime.get("immediate_resume_parent")
+                next_parent = (
+                    immediate_parent.get("checkpoint")
+                    if isinstance(immediate_parent, dict)
+                    else None
+                )
                 del parent_checkpoint
 
-                if not parent_treatment_name:
+                if not next_parent:
                     common_fork_parents.add(str(parent_path))
                     row["continuation_parent_step"] = lineage_steps[0]
                     row["common_fork_parent"] = str(parent_path)
@@ -944,17 +1176,13 @@ def validate_checkpoint_systems(
                         f"{row['label']} changed treatment across continuation: "
                         f"{parent_treatment_name!r} -> {row['treatment']!r}"
                     )
-                if not next_parent:
-                    raise RuntimeError(
-                        f"{row['label']} treatment lineage has no untreated fork"
-                    )
                 child_step = parent_step
                 parent_path = Path(str(next_parent)).expanduser().resolve()
         if len(common_fork_parents) != 1:
             raise RuntimeError(
                 "Controlled continuations do not share one matched fork lineage"
             )
-    parent_systems = [row for row in metadata if not row["treatment"]]
+    parent_systems = [row for row in metadata if row["parent"] is None]
     if parent_systems and trained:
         parent_paths = {str(Path(row["path"]).resolve()) for row in parent_systems}
         for row in trained:
@@ -1115,6 +1343,16 @@ def main() -> None:
         normalizer = normalizer_from_checkpoint(checkpoint, device)
         torch.testing.assert_close(normalizer.mean, reference_normalizer.mean)
         torch.testing.assert_close(normalizer.std, reference_normalizer.std)
+        if (
+            normalizer.normalize_contacts != reference_normalizer.normalize_contacts
+            or not same_variance_eps(
+                normalizer.variance_eps,
+                reference_normalizer.variance_eps,
+            )
+        ):
+            raise RuntimeError(
+                f"{label} uses a different contact/variance normalization protocol"
+            )
         model = create_model_from_checkpoint(checkpoint)
         model.load_state_dict(checkpoint[args.weight_source], strict=True)
         model = model.to(device).eval()
@@ -1172,6 +1410,17 @@ def main() -> None:
                 for name, pair_ids in subsets.items()
                 if pair_ids
             }
+            system["ode"]["physical_subset_aggregates"] = {
+                name: aggregate_physical_records(
+                    [
+                        row
+                        for row in system["ode"]["physical_records"]
+                        if tuple(row["group_pair_ids"]) in pair_ids
+                    ]
+                )
+                for name, pair_ids in subsets.items()
+                if pair_ids
+            }
 
     direct_comparisons = {}
     for index, value in enumerate(args.direct_comparison):
@@ -1188,14 +1437,26 @@ def main() -> None:
             seed=int(args.noise_seed) + 10_000 + index,
         )
 
+    unified_stage_comparison = all(
+        row.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT
+        for row in checkpoint_metadata
+    )
     result = {
         "format": "hy273_edit_same_source_fixed_t_probe_v1",
         "manifest": str(manifest),
         "train_manifest": str(train_manifest),
         "weight_source": str(args.weight_source),
-        "candidate_treatment": str(args.candidate_treatment),
+        "candidate_treatment": (
+            None if unified_stage_comparison else str(args.candidate_treatment)
+        ),
+        "comparison_design": (
+            "descriptive_within_run_training_stage"
+            if unified_stage_comparison
+            else "legacy_controlled_treatment"
+        ),
         "primary_endpoint": (
-            "t=0 text-only same-source instruction selection and correct-vs-empty gap"
+            "t=0 text-only same-source instruction selection, correct-vs-empty "
+            "gap, and correct-vs-source-copy gain"
         ),
         "supportive_endpoints": (
             "t>0 target-state-conditioned text ablations; not pure instruction assignment"
@@ -1259,6 +1520,7 @@ def main() -> None:
                 f"swapped={full['swapped_instruction_mse']:.6f} "
                 f"margin={full['instruction_margin']:.6f} "
                 f"empty_gap={full['correct_vs_empty_mse_gap']:.6f} "
+                f"source_gain={full['correct_vs_source_copy_mse_gain']:.6f} "
                 f"assignment={full['correct_assignment']:.3f}",
                 flush=True,
             )
@@ -1269,6 +1531,7 @@ def main() -> None:
                 f"correct={full['correct_instruction_mse']:.6f} "
                 f"sibling={full['swapped_instruction_mse']:.6f} "
                 f"empty_gap={full['correct_vs_empty_mse_gap']:.6f} "
+                f"source_gain={full['correct_vs_source_copy_mse_gain']:.6f} "
                 f"assignment={full['correct_assignment']:.3f}",
                 flush=True,
             )

@@ -73,6 +73,13 @@ class HY273RedenoiseKimodoLike(nn.Module):
         text_global_conditioning: str = "pooled_adaln",
         text_fusion_mode: str = "f00",
         backbone_type: str = "flux",
+        actor_exchange: bool = False,
+        actor_exchange_dim: int = 256,
+        actor_exchange_heads: int = 4,
+        llm2vec_context_cache_dir: str = "",
+        llm2vec_context_max_open_shards: int = 16,
+        local_text_cross_attention: bool = False,
+        llm2vec_token_sequence_mode: str = "sentence",
     ) -> None:
         super().__init__()
         if not motion_stats_dir or not local_root_stats_dir:
@@ -93,6 +100,19 @@ class HY273RedenoiseKimodoLike(nn.Module):
         self.text_global_conditioning = str(text_global_conditioning)
         self.text_fusion_mode = str(text_fusion_mode).lower()
         self.backbone_type = str(backbone_type)
+        self.actor_exchange = bool(actor_exchange)
+        self.local_text_cross_attention = bool(local_text_cross_attention)
+        if self.actor_exchange and self.backbone_type != "flux":
+            raise ValueError("Actor exchange currently requires the flux backbone")
+        if self.local_text_cross_attention and (
+            self.backbone_type != "flux"
+            or text_encoder not in {"llm2vec_cache", "kimodo_llm2vec_cache"}
+            or not str(llm2vec_context_cache_dir)
+        ):
+            raise ValueError(
+                "Local text cross-attention requires the Flux LLM2Vec path "
+                "and a contextual cache"
+            )
 
         self.root_input_proj = nn.Linear(self.model_in_dim, self.hidden_dim)
         self.body_input_proj = nn.Linear(LOCAL_ROOT_DIM + BODY_DIM + DIM_HY273, self.hidden_dim)
@@ -145,6 +165,9 @@ class HY273RedenoiseKimodoLike(nn.Module):
                 max_open_shards=hytext_max_open_shards,
                 strict_cache=hytext_strict_cache,
                 project_tokens=self.backbone_type == "flux",
+                context_cache_dir=llm2vec_context_cache_dir,
+                context_max_open_shards=llm2vec_context_max_open_shards,
+                token_sequence_mode=llm2vec_token_sequence_mode,
             )
         elif text_encoder in {"none", "null"}:
             self.text_encoder = NullTextEncoder(self.hidden_dim, max_text_tokens=max_text_tokens)
@@ -162,21 +185,34 @@ class HY273RedenoiseKimodoLike(nn.Module):
             )
 
         if self.backbone_type == "flux":
+            backbone_cls = FrameMotionTextDiT
+            actor_kwargs = {}
+            if self.actor_exchange:
+                from .hy273_actor_exchange import ActorExchangeFrameMotionTextDiT
+
+                backbone_cls = ActorExchangeFrameMotionTextDiT
+                actor_kwargs = {
+                    "actor_exchange_dim": int(actor_exchange_dim),
+                    "actor_exchange_heads": int(actor_exchange_heads),
+                }
             backbone_kwargs = {
                 "hidden_size": self.hidden_dim,
                 "num_heads": int(num_heads),
                 "mlp_ratio": float(mlp_ratio),
                 "dropout": float(dropout),
                 "text_fusion_mode": self.text_fusion_mode,
+                "local_text_cross_attention": self.local_text_cross_attention,
             }
-            self.root_backbone = FrameMotionTextDiT(
+            self.root_backbone = backbone_cls(
                 depth_double=int(root_depth_double),
                 depth_single=int(root_depth_single),
+                **actor_kwargs,
                 **backbone_kwargs,
             )
-            self.body_backbone = FrameMotionTextDiT(
+            self.body_backbone = backbone_cls(
                 depth_double=int(body_depth_double),
                 depth_single=int(body_depth_single),
+                **actor_kwargs,
                 **backbone_kwargs,
             )
         else:

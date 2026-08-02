@@ -56,6 +56,7 @@ from tools.eval_hy273_motionfix_edit import (
     _validate_exact_overwrite_contract,
     _paired_counterfactual_summary,
     _paired_edit_control_summary,
+    _paired_data_root,
     _protocol_manifest_from_preflight,
     _load_train_seen_index,
     _seen_strata,
@@ -191,6 +192,17 @@ VAL_MANIFEST = MANIFEST.with_name("val.jsonl")
 def test_checkpoint_step_prefers_next_global_step() -> None:
     assert _checkpoint_step({"next_global_step": 17, "step": 16}) == 17
     assert _checkpoint_step({"step": 16}) == 16
+
+
+def test_unified_actor_asset_root_follows_paired_task(tmp_path: Path) -> None:
+    interaction = tmp_path / "interaction"
+    reaction = tmp_path / "reaction"
+    assert _paired_data_root(
+        {"data": {"paired_task": "interaction", "interaction_root": str(interaction)}}
+    ) == ("interaction", interaction.resolve())
+    assert _paired_data_root(
+        {"data": {"paired_task": "reaction", "reaction_root": str(reaction)}}
+    ) == ("reaction", reaction.resolve())
 
 
 def test_seen_strata_tracks_exact_payloads_independently(tmp_path: Path) -> None:

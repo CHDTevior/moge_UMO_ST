@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from models.raw_motion.flow_schedule import (
 )
 from models.raw_motion.hy273_multitask_condition import (
     ABSOLUTE_TEXT_PROFILE,
+    INTERACTION_TEXT_PROFILE,
     RELATIVE_EDIT_TEXT_PROFILE,
     CapabilityId,
     ConditionBatch,
@@ -31,12 +32,23 @@ from models.raw_motion.hy273_multitask_condition import (
     TrainStream,
     make_absent_condition,
 )
-from models.raw_motion.hy273_normalizer import HY273Normalizer
-from models.raw_motion.hy273_slices import CONTACT_SLICE, CONT_DIM, DIM_HY273
+from models.raw_motion.hy273_normalizer import HY273Normalizer, apply_yaw_rotation
+from models.raw_motion.hy273_slices import (
+    CONTACT_SLICE,
+    CONT_DIM,
+    DIM_HY273,
+    HEADING_SLICE,
+    ROOT_SLICE,
+)
 from train_hy273_multitask import (
-    create_model_from_checkpoint,
+    create_model_from_checkpoint as create_legacy_model_from_checkpoint,
     load_config,
     validate_frozen_contract,
+)
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT as UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+    create_model as create_unified_actor_model,
+    validate_config as validate_unified_actor_config,
 )
 from tools.hy273_runtime_text_encoding import (
     encode_missing_text_rows,
@@ -60,6 +72,153 @@ class MultitaskODESampleOutput:
     protocol: dict[str, object]
 
 
+@dataclass(frozen=True)
+class ReactionGauge:
+    """Invertible source-centered frame used by Reaction training and sampling."""
+
+    source_motion: torch.Tensor
+    frame_gauge_dir: torch.Tensor
+    root_anchor_xz: torch.Tensor
+    yaw_delta: torch.Tensor
+
+
+def prepare_reaction_source(
+    source_motion: torch.Tensor,
+    *,
+    heading_rad: torch.Tensor | float | None = None,
+) -> ReactionGauge:
+    """Center the observed actor and optionally rotate it to a requested heading."""
+
+    if source_motion.ndim == 2:
+        source_motion = source_motion.unsqueeze(0)
+    if source_motion.ndim != 3 or source_motion.shape[-1] != DIM_HY273:
+        raise ValueError(f"source_motion must be [B,T,{DIM_HY273}]")
+    source = source_motion.float().clone()
+    if source.shape[1] < 1:
+        raise ValueError("Reaction source motion cannot be empty")
+    anchor = source[:, 0, [ROOT_SLICE.start, ROOT_SLICE.start + 2]].clone()
+    source[..., ROOT_SLICE.start] -= anchor[:, 0, None]
+    source[..., ROOT_SLICE.start + 2] -= anchor[:, 1, None]
+    current = torch.atan2(
+        source[:, 0, HEADING_SLICE.start + 1],
+        source[:, 0, HEADING_SLICE.start],
+    )
+    if heading_rad is None:
+        target = current
+    else:
+        target = torch.as_tensor(
+            heading_rad,
+            device=source.device,
+            dtype=source.dtype,
+        )
+        if target.ndim == 0:
+            target = target.expand(source.shape[0])
+        if target.shape != (source.shape[0],):
+            raise ValueError("heading_rad must be scalar or have shape [B]")
+    delta = target - current
+    source = apply_yaw_rotation(source, delta)
+    return ReactionGauge(
+        source_motion=source,
+        frame_gauge_dir=source[:, 0, HEADING_SLICE].clone(),
+        root_anchor_xz=anchor,
+        yaw_delta=delta,
+    )
+
+
+def restore_reaction_world(
+    motion: torch.Tensor,
+    gauge: ReactionGauge,
+) -> torch.Tensor:
+    """Map a generated reactor from the training gauge back to source world space."""
+
+    if motion.ndim != 3 or motion.shape[0] != gauge.source_motion.shape[0]:
+        raise ValueError("Reaction output must have shape [B,T,273] with matching B")
+    restored = apply_yaw_rotation(motion, -gauge.yaw_delta.to(motion.device))
+    anchor = gauge.root_anchor_xz.to(device=restored.device, dtype=restored.dtype)
+    restored[..., ROOT_SLICE.start] += anchor[:, 0, None]
+    restored[..., ROOT_SLICE.start + 2] += anchor[:, 1, None]
+    return restored
+
+
+def restore_reaction_sample_output(
+    output: MultitaskODESampleOutput,
+    gauge: ReactionGauge,
+) -> MultitaskODESampleOutput:
+    """Restore every public Reaction output and record the applied gauge."""
+
+    output.raw_motion = restore_reaction_world(output.raw_motion, gauge)
+    output.exact_clamped_motion = restore_reaction_world(
+        output.exact_clamped_motion, gauge
+    )
+    output.final_clean_prediction = restore_reaction_world(
+        output.final_clean_prediction, gauge
+    )
+    output.final_branch_predictions = {
+        name: restore_reaction_world(value, gauge)
+        for name, value in output.final_branch_predictions.items()
+    }
+    output.protocol.update(
+        {
+            "reaction_source_gauge": "source_root_centered_then_shared_yaw",
+            "reaction_output_frame": "restored_source_world",
+            "reaction_yaw_delta_rad": [
+                float(value) for value in gauge.yaw_delta.detach().cpu()
+            ],
+            "reaction_root_anchor_xz": gauge.root_anchor_xz.detach().cpu().tolist(),
+        }
+    )
+    return output
+
+
+def create_model_from_checkpoint(
+    checkpoint: dict[str, object],
+) -> torch.nn.Module:
+    if checkpoint.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+        config = checkpoint.get("config")
+        if not isinstance(config, dict):
+            raise ValueError("Unified actor checkpoint is missing its config")
+        validate_unified_actor_config(config)
+        return create_unified_actor_model(config)
+    return create_legacy_model_from_checkpoint(checkpoint)
+
+
+def validate_sampling_mode_checkpoint(
+    mode: str,
+    checkpoint: Mapping[str, object],
+    config: Mapping[str, object],
+    *,
+    allow_stage_a_reaction_diagnostic: bool = False,
+) -> None:
+    """Reject task routes that the checkpoint architecture never trained."""
+
+    data = config.get("data")
+    model = config.get("model")
+    data = data if isinstance(data, Mapping) else {}
+    model = model if isinstance(model, Mapping) else {}
+    paired_task = str(data.get("paired_task", "interaction"))
+    if mode == "reaction":
+        if checkpoint.get("format") != UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+            raise RuntimeError("Reaction mode requires a unified checkpoint")
+        if paired_task != "reaction":
+            raise RuntimeError("Reaction mode requires paired_task=reaction")
+        if model.get("source_fusion_mode") != "token_block":
+            raise RuntimeError("Reaction mode requires source_fusion_mode=token_block")
+        if model.get("text_token_sequence") != "sentence_plus_context":
+            raise RuntimeError(
+                "Reaction mode requires text_token_sequence=sentence_plus_context"
+            )
+        next_step = int(checkpoint.get("next_global_step", -1))
+        if next_step <= 100_000 and not allow_stage_a_reaction_diagnostic:
+            raise RuntimeError(
+                "Reaction mode requires a Stage-B checkpoint; use the explicit "
+                "diagnostic flag only for connectivity checks"
+            )
+    elif mode == "interaction" and paired_task != "interaction":
+        raise RuntimeError(
+            "Two-actor Interaction mode requires an archived paired_task=interaction checkpoint"
+        )
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -77,14 +236,26 @@ def normalizer_from_checkpoint(
     variance = state["variance_eps"]
     variance_eps = float(variance.item()) if torch.is_tensor(variance) else float(variance)
     config = checkpoint.get("config")
-    contact_protocol = (
-        config.get("flow", {}).get(
-            "contact_protocol", LEGACY_SPLIT_CONTACT_PROTOCOL
+    if checkpoint.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+        normalization = checkpoint.get("normalization")
+        normalize_contacts = bool(
+            normalization.get("normalize_contacts", False)
+            if isinstance(normalization, dict)
+            else False
         )
-        if isinstance(config, dict)
-        else LEGACY_SPLIT_CONTACT_PROTOCOL
-    )
-    normalize_contacts = uses_unified_273_flow(str(contact_protocol))
+        if not normalize_contacts:
+            raise RuntimeError(
+                "Unified actor checkpoint must use normalized 273D contacts"
+            )
+    else:
+        contact_protocol = (
+            config.get("flow", {}).get(
+                "contact_protocol", LEGACY_SPLIT_CONTACT_PROTOCOL
+            )
+            if isinstance(config, dict)
+            else LEGACY_SPLIT_CONTACT_PROTOCOL
+        )
+        normalize_contacts = uses_unified_273_flow(str(contact_protocol))
     return HY273Normalizer(
         torch.as_tensor(state["mean"]).reshape(DIM_HY273),
         torch.as_tensor(state["std"]).reshape(DIM_HY273),
@@ -188,6 +359,67 @@ def make_edit_condition(
             bsz, device=source_motion.device, dtype=torch.bool
         ),
         target_to_source_time_map=None,
+    )
+    condition.validate()
+    return condition
+
+
+def make_reaction_condition(
+    source_motion: torch.Tensor,
+    *,
+    target_lengths: torch.Tensor,
+    source_lengths: torch.Tensor | None = None,
+    target_frames: int | None = None,
+    frame_gauge_dir: torch.Tensor | None = None,
+    source_person_index: int | torch.Tensor,
+) -> ConditionBatch:
+    """Create an observed actor condition for one reactor target.
+
+    ``source_person_index`` identifies whether the observed source is the first
+    (0) or second (1) person referred to by the pair-level Inter-X caption.
+    """
+
+    base = make_edit_condition(
+        source_motion,
+        target_lengths=target_lengths,
+        source_lengths=source_lengths,
+        target_frames=target_frames,
+        capability=CapabilityId.MOTION_EDIT,
+        frame_gauge_dir=frame_gauge_dir,
+    )
+    target_op = torch.full_like(base.target_op_id, int(TargetOp.PRESERVE))
+    target_op[base.target_valid] = int(TargetOp.GENERATE)
+    person_index = torch.as_tensor(
+        source_person_index,
+        device=base.source_role_id.device,
+        dtype=torch.long,
+    )
+    if person_index.ndim == 0:
+        person_index = person_index.expand(base.batch_size)
+    if person_index.shape != (base.batch_size,):
+        raise ValueError("source_person_index must be scalar or have shape [B]")
+    if bool(((person_index < 0) | (person_index > 1)).any()):
+        raise ValueError("source_person_index must contain only 0 (P1) or 1 (P2)")
+    source_roles = torch.where(
+        person_index == 0,
+        torch.full_like(person_index, int(SourceRole.OTHER_ACTOR_FIRST_PERSON)),
+        torch.full_like(person_index, int(SourceRole.OTHER_ACTOR_SECOND_PERSON)),
+    )[:, None]
+    condition = replace(
+        base,
+        train_stream_id=torch.full_like(
+            base.train_stream_id, int(TrainStream.REACTION)
+        ),
+        task_id=torch.full_like(base.task_id, int(TaskId.REACTION)),
+        capability_id=torch.full_like(
+            base.capability_id, int(CapabilityId.TEXT_REACTION)
+        ),
+        text_encoding_profile=(INTERACTION_TEXT_PROFILE,) * base.batch_size,
+        target_op_id=target_op,
+        source_role_id=source_roles,
+        frame_policy_id=torch.full_like(
+            base.frame_policy_id, int(FramePolicy.SHARED_WORLD)
+        ),
     )
     condition.validate()
     return condition
@@ -327,7 +559,11 @@ def _route(
         if capability not in {CapabilityId.MOTION_EDIT, CapabilityId.MOTION_EDIT_CONTROL}:
             raise ValueError("EDIT route has a generation capability")
         return "edit", has_control
-    raise ValueError("REACTION sampling is reserved for a future protocol")
+    if task == TaskId.REACTION:
+        if capability != CapabilityId.TEXT_REACTION or has_control:
+            raise ValueError("REACTION requires TEXT_REACTION without sparse control")
+        return "reaction", False
+    raise ValueError("Two-actor INTERACTION uses its archived sampler")
 
 
 def _branch_spec(
@@ -344,7 +580,7 @@ def _branch_spec(
             [texts, texts, empty, empty],
             (True, False, True, False),
         )
-    if route == "edit" and not has_control:
+    if route in {"edit", "reaction"} and not has_control:
         return (
             ("empty", "source", "joint"),
             [empty, empty, texts],
@@ -378,6 +614,15 @@ def _guided_prediction(
             branches["empty"]
             + float(text_cfg_scale) * (branches["text"] - branches["empty"])
             + float(control_cfg_scale) * (branches["control"] - branches["empty"])
+        )
+        selected = guided if cfg_apply_contacts else branches["joint"].clone()
+    elif route == "reaction":
+        guided = (
+            branches["empty"]
+            + float(source_cfg_scale)
+            * (branches["source"] - branches["empty"])
+            + float(text_cfg_scale)
+            * (branches["joint"] - branches["source"])
         )
         selected = guided if cfg_apply_contacts else branches["joint"].clone()
     elif not has_control:
@@ -641,7 +886,7 @@ def sample_hy273_multitask_ode(
         len(branch_names),
         v1_strict=not diagnostic_allow_source_absent_edit,
     )
-    if route == "edit":
+    if route in {"edit", "reaction"}:
         repeated_condition = _clear_source_branch(
             repeated_condition,
             branch_index=branch_names.index("empty"),
@@ -809,6 +1054,158 @@ def sample_hy273_multitask_ode(
     )
 
 
+@torch.no_grad()
+def sample_hy273_interaction_ode(
+    model: torch.nn.Module,
+    normalizer: HY273Normalizer,
+    texts: Iterable[str],
+    target_lengths: torch.Tensor,
+    *,
+    num_steps: int = 32,
+    cfg_scale: float = 3.5,
+    c_dir: torch.Tensor | None = None,
+    velocity_t_eps: float = 1e-4,
+    generator: torch.Generator | None = None,
+    initial_noise: torch.Tensor | None = None,
+) -> MultitaskODESampleOutput:
+    """Jointly generate two actors with InterGen-style two-way text CFG."""
+
+    if not normalizer.normalize_contacts:
+        raise ValueError("Interaction sampling requires unified 273D flow")
+    if num_steps <= 0 or velocity_t_eps <= 0:
+        raise ValueError("num_steps and velocity_t_eps must be positive")
+    if not torch.isfinite(torch.tensor(float(cfg_scale))):
+        raise ValueError("cfg_scale must be finite")
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    text_rows = tuple(texts)
+    batch = len(text_rows)
+    if batch == 0:
+        raise ValueError("At least one interaction text is required")
+    lengths = target_lengths.to(device=device, dtype=torch.long).reshape(-1)
+    if lengths.shape != (batch,) or bool((lengths <= 0).any()):
+        raise ValueError("target_lengths must contain one positive length per text")
+    frames = int(lengths.max().item())
+    if frames > int(getattr(model, "max_frames", frames)):
+        raise ValueError(
+            f"Requested {frames} frames exceeds model max_frames="
+            f"{getattr(model, 'max_frames', 'unknown')}"
+        )
+    scene_valid = (
+        torch.arange(frames, device=device).view(1, 1, frames)
+        < lengths.view(batch, 1, 1)
+    ).expand(batch, 2, frames)
+    expected_shape = (batch, 2, frames, DIM_HY273)
+    if initial_noise is None:
+        state = torch.randn(
+            expected_shape,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
+        initial_noise_source = "torch_randn_independent_actor_273d"
+    else:
+        if initial_noise.shape != expected_shape:
+            raise ValueError(
+                f"initial_noise must have shape {expected_shape}, "
+                f"got {tuple(initial_noise.shape)}"
+            )
+        state = initial_noise.to(device=device, dtype=dtype).clone()
+        initial_noise_source = "provided_independent_actor_273d"
+    if c_dir is None:
+        c_dir = torch.zeros(batch, 2, device=device, dtype=dtype)
+        c_dir[:, 0] = 1.0
+    else:
+        c_dir = c_dir.to(device=device, dtype=dtype)
+        if c_dir.shape != (batch, 2):
+            raise ValueError("c_dir must have shape [B,2]")
+        norm = torch.linalg.vector_norm(c_dir.float(), dim=-1)
+        if bool((norm < 1e-6).any()):
+            raise ValueError("c_dir rows must be non-zero")
+        c_dir = c_dir / norm.to(dtype=dtype).unsqueeze(-1)
+
+    task_id = torch.full(
+        (batch,), int(TaskId.INTERACTION), device=device, dtype=torch.long
+    )
+    zero_mask = torch.zeros_like(state)
+    grid = make_ode_grid(num_steps, device=device).to(dtype=dtype)
+    final_clean = state.clone()
+    final_branches: dict[str, torch.Tensor] = {}
+    branch_text = ("",) * batch + text_rows
+    branch_profiles = (INTERACTION_TEXT_PROFILE,) * (2 * batch)
+    for step_index in range(num_steps):
+        t = grid[step_index].expand(batch)
+        dt = grid[step_index + 1] - grid[step_index]
+        prediction = model(
+            torch.cat(
+                [
+                    torch.cat([state, zero_mask], dim=-1),
+                    torch.cat([state, zero_mask], dim=-1),
+                ],
+                dim=0,
+            ),
+            t=t.repeat(2),
+            c_dir=c_dir.repeat(2, 1),
+            text=branch_text,
+            length_mask=scene_valid.repeat(2, 1, 1),
+            task_id=task_id.repeat(2),
+            text_profiles=branch_profiles,
+        )
+        unconditional, conditional = prediction.chunk(2, dim=0)
+        final_branches = {
+            "empty": unconditional,
+            "text": conditional,
+        }
+        final_clean = unconditional + float(cfg_scale) * (
+            conditional - unconditional
+        )
+        state, _ = clean_x0_euler_step(
+            state,
+            final_clean,
+            timestep=t,
+            dt=dt,
+            velocity_t_eps=velocity_t_eps,
+        )
+
+    def decode(value: torch.Tensor) -> torch.Tensor:
+        physical = normalizer.denormalize(value.float())
+        physical[..., CONTACT_SLICE] = (
+            physical[..., CONTACT_SLICE] >= 0.5
+        ).to(dtype=physical.dtype)
+        return physical
+
+    raw = decode(state)
+    clean = decode(final_clean)
+    branch_physical = {
+        name: decode(value) for name, value in final_branches.items()
+    }
+    for batch_index, length_value in enumerate(lengths):
+        length = int(length_value.item())
+        if length < frames:
+            for value in (raw, clean, *branch_physical.values()):
+                value[batch_index, :, length:] = value[
+                    batch_index, :, length - 1 : length
+                ]
+    protocol = {
+        "sampling_protocol": "hy273_unified_actor_interaction_cfg_v1",
+        "mode": "interaction",
+        "ode_steps": int(num_steps),
+        "text_cfg_scale": float(cfg_scale),
+        "initial_noise_source": initial_noise_source,
+        "actor_noise": "independent",
+        "scene_timestep_text_c_dir": "shared",
+        "contact_feedback": "ode_273d",
+    }
+    return MultitaskODESampleOutput(
+        raw_motion=raw,
+        exact_clamped_motion=raw.clone(),
+        final_clean_prediction=clean,
+        final_branch_predictions=branch_physical,
+        branch_names=("empty", "text"),
+        protocol=protocol,
+    )
+
+
 def _load_array(path: str, name: str) -> torch.Tensor:
     if not path:
         raise ValueError(f"--{name} is required for this mode")
@@ -824,11 +1221,50 @@ def main() -> None:
     parser.add_argument("--checkpoint_sha256", default="")
     parser.add_argument("--weight_source", choices=["ema", "raw"], default="ema")
     parser.add_argument(
-        "--mode", choices=["t2m", "control", "edit", "edit_control"], required=True
+        "--mode",
+        choices=[
+            "t2m",
+            "control",
+            "edit",
+            "edit_control",
+            "reaction",
+            "interaction",
+        ],
+        required=True,
     )
     parser.add_argument("--text", action="append", default=[])
-    parser.add_argument("--target_length", type=int, default=150)
+    parser.add_argument(
+        "--target_length",
+        type=int,
+        default=None,
+        help=(
+            "Target frames. Defaults to source length for Edit/Reaction and 150 "
+            "for source-free generation."
+        ),
+    )
     parser.add_argument("--source_npy", default="")
+    parser.add_argument(
+        "--source_fps",
+        type=float,
+        default=None,
+        help="Physical FPS of source_npy. Reaction currently accepts exact 30 FPS K273 only.",
+    )
+    parser.add_argument(
+        "--reaction_source_person_index",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help=(
+            "For Reaction, whether source_npy is the first (0) or second (1) "
+            "person referred to by the interaction text. Required in Reaction mode."
+        ),
+    )
+    parser.add_argument("--reaction_clip_id", default="")
+    parser.add_argument(
+        "--allow_stage_a_reaction_diagnostic",
+        action="store_true",
+        help="Allow Reaction connectivity diagnostics before its Stage-B training begins.",
+    )
     parser.add_argument("--source_anchor_npy", default="")
     parser.add_argument("--observed_npy", default="")
     parser.add_argument("--mask_npy", default="")
@@ -856,6 +1292,15 @@ def main() -> None:
         "--cfg_apply_contacts", action=argparse.BooleanOptionalAction, default=None
     )
     parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument(
+        "--heading_deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Scene reference direction in degrees. Reaction rotates the observed actor "
+            "to this heading during denoising and restores outputs to source world space."
+        ),
+    )
     parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()
 
@@ -868,7 +1313,16 @@ def main() -> None:
     config = checkpoint.get("config")
     if not isinstance(config, dict):
         raise RuntimeError("Checkpoint does not contain resolved multitask config")
-    validate_frozen_contract(config)
+    if checkpoint.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+        validate_unified_actor_config(config)
+    else:
+        validate_frozen_contract(config)
+    validate_sampling_mode_checkpoint(
+        args.mode,
+        checkpoint,
+        config,
+        allow_stage_a_reaction_diagnostic=args.allow_stage_a_reaction_diagnostic,
+    )
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = create_model_from_checkpoint(checkpoint).to(device)
     weights = checkpoint["ema"] if args.weight_source == "ema" else checkpoint["model"]
@@ -877,40 +1331,86 @@ def main() -> None:
     normalizer = normalizer_from_checkpoint(checkpoint, device)
 
     source = None
-    if args.mode.startswith("edit"):
+    reaction_gauge = None
+    if args.mode.startswith("edit") or args.mode == "reaction":
         source = _load_array(args.source_npy, "source_npy")
         bsz = source.shape[0]
     else:
+        if args.mode == "interaction" and not args.text:
+            raise ValueError("Interaction mode requires at least one --text")
         bsz = max(len(args.text), 1)
+    target_length = (
+        int(args.target_length)
+        if args.target_length is not None
+        else int(source.shape[1])
+        if source is not None
+        else 150
+    )
+    if target_length <= 0:
+        raise ValueError("target_length must be positive")
+    if args.mode == "reaction":
+        if source is None:
+            raise RuntimeError("Reaction source was not loaded")
+        if args.reaction_source_person_index is None:
+            raise ValueError(
+                "Reaction requires explicit --reaction_source_person_index 0 or 1"
+            )
+        if args.source_fps is None:
+            raise ValueError("Reaction requires explicit --source_fps 30")
+        if float(args.source_fps) != 30.0:
+            raise ValueError(
+                "Reaction source must be exact 30 FPS K273; resample rotations/root "
+                "and recompute heading, velocities, and contacts before sampling"
+            )
+        if target_length != int(source.shape[1]):
+            raise ValueError(
+                "Reaction uses synchronized Inter-X actor/reactor frames; "
+                "target_length must equal the source length"
+            )
+        reaction_gauge = prepare_reaction_source(
+            source,
+            heading_rad=float(args.heading_deg) * torch.pi / 180.0,
+        )
+        source = reaction_gauge.source_motion
     texts = args.text or ([""] * bsz)
     if len(texts) == 1 and bsz > 1:
         texts = texts * bsz
     if len(texts) != bsz:
         raise ValueError("Number of --text values must match the batch size")
-    lengths = torch.full((bsz,), int(args.target_length), dtype=torch.long)
+    lengths = torch.full((bsz,), target_length, dtype=torch.long)
     controlled = args.mode in {"control", "edit_control"}
-    capability = {
-        "t2m": CapabilityId.T2M,
-        "control": CapabilityId.KIMODO_CONTROL,
-        "edit": CapabilityId.MOTION_EDIT,
-        "edit_control": CapabilityId.MOTION_EDIT_CONTROL,
-    }[args.mode]
-    if source is None:
-        condition = make_absent_condition(
-            batch_size=bsz,
-            target_frames=int(args.target_length),
-            target_lengths=lengths,
-            capability=capability,
-        )
-    else:
-        condition = make_edit_condition(
-            source,
-            target_lengths=lengths,
-            capability=capability,
-        )
+    condition = None
+    if args.mode != "interaction":
+        capability = {
+            "t2m": CapabilityId.T2M,
+            "control": CapabilityId.KIMODO_CONTROL,
+            "edit": CapabilityId.MOTION_EDIT,
+            "edit_control": CapabilityId.MOTION_EDIT_CONTROL,
+            "reaction": CapabilityId.TEXT_REACTION,
+        }[args.mode]
+        if source is None:
+            condition = make_absent_condition(
+                batch_size=bsz,
+                target_frames=target_length,
+                target_lengths=lengths,
+                capability=capability,
+            )
+        elif args.mode == "reaction":
+            condition = make_reaction_condition(
+                source,
+                target_lengths=lengths,
+                frame_gauge_dir=reaction_gauge.frame_gauge_dir,
+                source_person_index=args.reaction_source_person_index,
+            )
+        else:
+            condition = make_edit_condition(
+                source,
+                target_lengths=lengths,
+                capability=capability,
+            )
     if args.ease is not None:
-        if args.mode.startswith("edit"):
-            raise ValueError("The first Ease protocol supports GENERATE routes only")
+        if condition is None or args.mode.startswith("edit") or args.mode == "reaction":
+            raise ValueError("The first Ease protocol supports single-actor GENERATE routes only")
         ease = torch.tensor(args.ease, dtype=torch.float32).view(1, 6)
         condition = replace(
             condition,
@@ -921,26 +1421,85 @@ def main() -> None:
     text_profiles = (
         [RELATIVE_EDIT_TEXT_PROFILE] * bsz
         if args.mode.startswith("edit")
+        else [INTERACTION_TEXT_PROFILE] * bsz
+        if args.mode in {"reaction", "interaction"}
         else [ABSOLUTE_TEXT_PROFILE] * bsz
     )
+    context_cache = getattr(model.text_encoder, "context_cache", None)
     runtime_text_rows = encode_missing_text_rows(
         model.text_encoder.cache,
         texts,
         text_profiles,
         device,
+        context_cache=context_cache,
     )
-    register_runtime_text_rows(model.text_encoder.cache, runtime_text_rows)
+    register_runtime_text_rows(
+        model.text_encoder.cache,
+        runtime_text_rows,
+        context_cache=context_cache,
+    )
+    if args.mode == "interaction":
+        heading = torch.deg2rad(
+            torch.full((bsz,), float(args.heading_deg), dtype=torch.float32)
+        )
+        interaction_c_dir = torch.stack(
+            [torch.cos(heading), torch.sin(heading)], dim=-1
+        )
+        generator = torch.Generator(device=device).manual_seed(int(args.seed))
+        output = sample_hy273_interaction_ode(
+            model,
+            normalizer,
+            texts,
+            lengths,
+            num_steps=args.num_steps,
+            cfg_scale=(
+                3.5 if args.text_cfg_scale is None else args.text_cfg_scale
+            ),
+            c_dir=interaction_c_dir,
+            generator=generator,
+        )
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        np.save(output_dir / "samples_raw.npy", output.raw_motion.cpu().numpy())
+        np.save(
+            output_dir / "final_clean_prediction.npy",
+            output.final_clean_prediction.cpu().numpy(),
+        )
+        for name, value in output.final_branch_predictions.items():
+            np.save(output_dir / f"final_branch_{name}.npy", value.cpu().numpy())
+        metadata = {
+            **output.protocol,
+            "checkpoint": str(checkpoint_path),
+            "weight_source": args.weight_source,
+            "seed": int(args.seed),
+            "texts": texts,
+            "runtime_encoded_text_rows": int(runtime_text_rows.count),
+            "lengths": lengths.tolist(),
+            "heading_deg": float(args.heading_deg),
+        }
+        (output_dir / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {"output_dir": str(output_dir), **output.protocol},
+                sort_keys=True,
+            )
+        )
+        return
     source_anchor = None
     if args.edit_source_baseline == "exact":
         if args.source_anchor_npy:
             source_anchor = _load_array(args.source_anchor_npy, "source_anchor_npy")
-        elif source is not None and source.shape[1] == int(args.target_length):
+        elif source is not None and source.shape[1] == target_length:
             source_anchor = source
         else:
             raise ValueError(
                 "Exact Edit baseline requires --source_anchor_npy when source and target lengths differ"
             )
-    shape = (bsz, int(args.target_length), DIM_HY273)
+    shape = (bsz, target_length, DIM_HY273)
     if controlled:
         observed = _load_array(args.observed_npy, "observed_npy")
         mask = _load_array(args.mask_npy, "mask_npy").bool()
@@ -970,6 +1529,10 @@ def main() -> None:
         edit_source_baseline=args.edit_source_baseline,
         edit_source_anchor_physical=source_anchor,
     )
+    if args.mode == "reaction":
+        if reaction_gauge is None:
+            raise RuntimeError("Reaction gauge was not prepared")
+        output = restore_reaction_sample_output(output, reaction_gauge)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     np.save(output_dir / "samples_raw.npy", output.raw_motion.cpu().numpy())
@@ -986,6 +1549,14 @@ def main() -> None:
         "texts": texts,
         "runtime_encoded_text_rows": int(runtime_text_rows.count),
         "lengths": lengths.tolist(),
+        "heading_deg": float(args.heading_deg),
+        "reaction_source_person_index": (
+            int(args.reaction_source_person_index)
+            if args.mode == "reaction"
+            else None
+        ),
+        "reaction_clip_id": args.reaction_clip_id if args.mode == "reaction" else None,
+        "source_fps": float(args.source_fps) if args.source_fps is not None else None,
         "ease_physical": (
             None if args.ease is None else [float(value) for value in args.ease]
         ),

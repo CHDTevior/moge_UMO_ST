@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from .hy273_normalizer import HY273Normalizer
 from .hy273_multitask_losses import (
+    RatioLossTerm,
     SEMANTIC_SLICES,
     SEMANTIC_WEIGHTS,
     SEMANTIC_WEIGHT_SUM,
@@ -66,6 +67,41 @@ class UnifiedEditLossBundle:
     instruction_rank_eligible_fraction: torch.Tensor
     instruction_rank_slope: torch.Tensor
     instruction_rank_margin: torch.Tensor
+    terms: dict[str, RatioLossTerm]
+
+    def refresh_ratio_terms(self, weights: UnifiedEditLossWeights) -> None:
+        """Rebuild auxiliary totals after distributed denominators are attached."""
+
+        if not self.terms:
+            return
+        zero = self.total * 0.0
+        self.target_x0_raw = sum(
+            (
+                term.weighted
+                for term in self.terms.values()
+                if term.group == "edit_target_x0"
+            ),
+            zero,
+        )
+        self.hard_x0_raw = sum(
+            (
+                term.weighted
+                for term in self.terms.values()
+                if term.group == "edit_hard_x0"
+            ),
+            zero,
+        )
+        self.target_x0_weighted = (
+            self.target_x0_raw * float(weights.target_x0_scale)
+        )
+        self.hard_x0_weighted = (
+            self.hard_x0_raw * float(weights.hard_x0_scale)
+        )
+        self.total = (
+            self.target_x0_weighted
+            + self.hard_x0_weighted
+            + self.instruction_rank_weighted
+        )
 
 
 @dataclass
@@ -635,6 +671,62 @@ def _semantic_hard_distance_per_sample(
     return torch.stack(per_block, dim=0).sum(dim=0) / SEMANTIC_WEIGHT_SUM
 
 
+def _semantic_ratio_terms(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    prefix: str,
+    group: str,
+) -> dict[str, RatioLossTerm]:
+    terms: dict[str, RatioLossTerm] = {}
+    for name, block_slice in SEMANTIC_SLICES.items():
+        block_values = values[..., block_slice]
+        block_mask = mask[..., block_slice].to(dtype=block_values.dtype)
+        terms[f"{prefix}_{name}"] = RatioLossTerm(
+            name=f"{prefix}_{name}",
+            group=group,
+            numerator=(block_values * block_mask).sum(),
+            denominator=block_mask.sum(),
+            weight=float(SEMANTIC_WEIGHTS[name]) / SEMANTIC_WEIGHT_SUM,
+        )
+    return terms
+
+
+def _semantic_hard_ratio_terms(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    fraction: float,
+) -> dict[str, RatioLossTerm]:
+    terms: dict[str, RatioLossTerm] = {}
+    for name, block_slice in SEMANTIC_SLICES.items():
+        block_values = values[..., block_slice]
+        block_mask = mask[..., block_slice]
+        selected_sums = []
+        selected_count = 0
+        for sample_index in range(values.shape[0]):
+            selected = block_values[sample_index][block_mask[sample_index]]
+            if selected.numel() == 0:
+                continue
+            count = max(1, int(math.ceil(selected.numel() * float(fraction))))
+            selected_sums.append(
+                selected.topk(count, sorted=False).values.sum()
+            )
+            selected_count += count
+        numerator = (
+            torch.stack(selected_sums).sum()
+            if selected_sums
+            else block_values.sum() * 0.0
+        )
+        terms[f"edit_hard_x0_{name}"] = RatioLossTerm(
+            name=f"edit_hard_x0_{name}",
+            group="edit_hard_x0",
+            numerator=numerator,
+            denominator=block_values.new_tensor(float(selected_count)),
+            weight=float(SEMANTIC_WEIGHTS[name]) / SEMANTIC_WEIGHT_SUM,
+        )
+    return terms
+
+
 def compute_unified_edit_loss(
     *,
     correct_x0_hat_cont: torch.Tensor,
@@ -647,6 +739,7 @@ def compute_unified_edit_loss(
     instruction_rank_temperature: float = 0.01,
     instruction_rank_sample_mask: torch.Tensor | None = None,
     instruction_rank_denominator: torch.Tensor | float | None = None,
+    auxiliary_reduction: str = "per_sample",
 ) -> UnifiedEditLossBundle:
     """Emphasize hard target regions and require instruction sensitivity.
 
@@ -670,6 +763,11 @@ def compute_unified_edit_loss(
         raise ValueError("hard_mask must have shape [B,T,273]")
     if instruction_rank_mode not in {"hinge", "softplus"}:
         raise ValueError("instruction_rank_mode must be 'hinge' or 'softplus'")
+    if auxiliary_reduction not in {"per_sample", "global_element_ratio"}:
+        raise ValueError(
+            "auxiliary_reduction must be 'per_sample' or "
+            "'global_element_ratio'"
+        )
     if (
         not math.isfinite(float(instruction_rank_temperature))
         or float(instruction_rank_temperature) <= 0.0
@@ -755,8 +853,43 @@ def compute_unified_edit_loss(
             torch.ones_like(rank_denominator),
         )
     rank_active = (rank_margin > 0) & rank_eligible
-    target_x0_raw = correct_distance.mean()
-    hard_x0_raw = hard_distance.mean()
+    terms: dict[str, RatioLossTerm] = {}
+    if auxiliary_reduction == "global_element_ratio":
+        terms.update(
+            _semantic_ratio_terms(
+                correct_values,
+                unobserved,
+                prefix="edit_target_x0",
+                group="edit_target_x0",
+            )
+        )
+        terms.update(
+            _semantic_hard_ratio_terms(
+                correct_values,
+                unobserved,
+                weights.hard_fraction,
+            )
+        )
+        zero = correct_values.sum() * 0.0
+        target_x0_raw = sum(
+            (
+                term.weighted
+                for term in terms.values()
+                if term.group == "edit_target_x0"
+            ),
+            zero,
+        )
+        hard_x0_raw = sum(
+            (
+                term.weighted
+                for term in terms.values()
+                if term.group == "edit_hard_x0"
+            ),
+            zero,
+        )
+    else:
+        target_x0_raw = correct_distance.mean()
+        hard_x0_raw = hard_distance.mean()
     instruction_rank_raw = (rank_per_sample * rank_weight).sum() / rank_denominator
     instruction_rank_ce_raw = (
         (rank_ce_per_sample * rank_weight).sum() / rank_denominator
@@ -786,6 +919,7 @@ def compute_unified_edit_loss(
         instruction_rank_eligible_fraction=rank_eligible.float().mean(),
         instruction_rank_slope=(rank_slope * rank_weight).sum() / rank_denominator,
         instruction_rank_margin=(rank_margin * rank_weight).sum() / rank_denominator,
+        terms=terms,
     )
 
 

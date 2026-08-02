@@ -8,6 +8,7 @@ import torch
 
 from models.raw_motion.hy273_normalizer import HY273Normalizer, apply_yaw_rotation
 from tools.eval_hy273_edit_same_source_fixed_t import (
+    aggregate_physical_records,
     aggregate_group_records,
     paired_bootstrap_direct_comparison,
     parse_system_expectation,
@@ -292,6 +293,8 @@ def test_same_source_eval_bootstraps_reconstruction_and_instruction_metrics() ->
                     "empty_instruction_mse": correct + 0.25,
                     "correct_vs_empty_mse_gap": 0.25,
                     "correct_vs_empty_effect_rms": effect / 2,
+                    "source_copy_mse": 3.0,
+                    "correct_vs_source_copy_mse_gain": 3.0 - correct,
                 }
                 for space in spaces
             },
@@ -327,6 +330,45 @@ def test_same_source_eval_bootstraps_reconstruction_and_instruction_metrics() ->
     ] == 1.0
     assert metrics["text_effect_rms"]["mean_delta_candidate_minus_baseline"] == 0.3
     assert metrics["text_effect_rms"]["better_direction"] == "diagnostic_two_sided"
+    assert metrics["correct_vs_source_copy_mse_gain"][
+        "mean_delta_candidate_minus_baseline"
+    ] == 0.5
+    assert metrics["correct_vs_source_copy_mse_gain"]["better_direction"] == "positive"
+
+
+def test_same_source_eval_aggregates_optional_physical_metrics_by_branch() -> None:
+    records = [
+        {
+            "branch": "correct",
+            "metrics": {
+                "changed_region_target_error_m": 0.1,
+                "unchanged_region_source_error_m": None,
+            },
+        },
+        {
+            "branch": "correct",
+            "metrics": {
+                "changed_region_target_error_m": 0.3,
+                "unchanged_region_source_error_m": 0.02,
+            },
+        },
+        {
+            "branch": "empty",
+            "metrics": {
+                "changed_region_target_error_m": 0.4,
+                "unchanged_region_source_error_m": 0.01,
+            },
+        },
+    ]
+
+    aggregate = aggregate_physical_records(records)
+
+    assert aggregate["correct"]["cases"] == 2
+    assert aggregate["correct"]["changed_region_target_error_m"] == pytest.approx(0.2)
+    assert aggregate["correct"]["unchanged_region_source_error_m"] == pytest.approx(
+        0.02
+    )
+    assert aggregate["empty"]["changed_region_target_error_m"] == pytest.approx(0.4)
 
 
 def test_same_source_eval_directly_bootstraps_hinge_vs_softplus() -> None:
@@ -345,6 +387,8 @@ def test_same_source_eval_directly_bootstraps_hinge_vs_softplus() -> None:
                     "empty_instruction_mse": 1.25,
                     "correct_vs_empty_mse_gap": 0.25,
                     "correct_vs_empty_effect_rms": 0.1,
+                    "source_copy_mse": 1.5,
+                    "correct_vs_source_copy_mse_gain": 0.5,
                 }
                 for space in ("full_273", "continuous_269", "contact_4")
             },
@@ -475,6 +519,8 @@ def test_same_source_eval_pairs_groups_by_key_before_bootstrap() -> None:
                     "empty_instruction_mse": correct + 0.5,
                     "correct_vs_empty_mse_gap": 0.5,
                     "correct_vs_empty_effect_rms": 0.25,
+                    "source_copy_mse": 20.0,
+                    "correct_vs_source_copy_mse_gain": 20.0 - correct,
                 }
                 for space in spaces
             },
@@ -523,6 +569,7 @@ def _write_continuation_checkpoint(
     step: int,
     treatment: str,
     parent: Path | None,
+    null_parent: bool = False,
 ) -> None:
     torch.save(
         {
@@ -537,12 +584,198 @@ def _write_continuation_checkpoint(
                     "research_treatment": {"name": treatment},
                 },
                 "immediate_resume_parent": (
-                    {} if parent is None else {"checkpoint": str(parent.resolve())}
+                    None
+                    if parent is None and null_parent
+                    else (
+                        {}
+                        if parent is None
+                        else {"checkpoint": str(parent.resolve())}
+                    )
                 ),
             },
         },
         path,
     )
+
+
+def _write_unified_actor_checkpoint(
+    path: Path,
+    *,
+    step: int,
+    run_name: str = "unified_actor_test_run",
+    variance_eps: float = 1e-5,
+) -> None:
+    torch.save(
+        {
+            "format": "hy273_unified_actor_checkpoint_v1",
+            "run_name": run_name,
+            "next_global_step": step,
+            "model": {},
+            "ema": {},
+            "config": {
+                "schedule": {
+                    "segments": [
+                        {
+                            "start": 0,
+                            "end": 100000,
+                            "t2m": 100,
+                            "edit": 0,
+                            "interaction": 0,
+                        },
+                        {
+                            "start": 100000,
+                            "end": 200000,
+                            "t2m": 30,
+                            "edit": 35,
+                            "interaction": 35,
+                        },
+                    ]
+                },
+                "flow": {"prediction_type": "x0", "loss_space": "velocity_mse"},
+                "text": {"encoder": "llm2vec_cache"},
+                "model": {
+                    "text_global_conditioning": "llm2vec_tokens_only",
+                    "source_fusion_mode": "additive",
+                    "dropout": 0.0,
+                },
+                "training": {
+                    "max_global_step": 200000,
+                    "stage_a_adaptation_lr": 0.0,
+                    "stage_b_adaptation_lr": 1e-4,
+                    "batch_size_t2m_edit_per_rank": 16,
+                    "batch_size_interaction_per_rank": 8,
+                },
+                "normalization": {
+                    "normalize_contacts": True,
+                    "variance_eps": variance_eps,
+                },
+            },
+            "normalization": {
+                "normalize_contacts": True,
+                "variance_eps": variance_eps,
+            },
+            "normalizer": {
+                "mean": torch.zeros(273),
+                "std": torch.ones(273),
+                "variance_eps": torch.tensor(variance_eps),
+            },
+        },
+        path,
+    )
+
+
+def test_same_source_eval_accepts_unified_actor_checkpoints(
+    tmp_path: Path,
+) -> None:
+    stage_a = tmp_path / "stage_a_100k.pt"
+    stage_b = tmp_path / "stage_b_200k.pt"
+    _write_unified_actor_checkpoint(stage_a, step=100000)
+    _write_unified_actor_checkpoint(stage_b, step=200000)
+
+    metadata = validate_checkpoint_systems(
+        [("stage_a", stage_a), ("stage_b", stage_b)],
+        expectations={
+            "stage_a": (100000, "t2m"),
+            "stage_b": (200000, "t2m_edit_interaction"),
+        },
+        weight_source="ema",
+    )
+
+    assert [row["step"] for row in metadata] == [100000, 200000]
+    assert {row["format"] for row in metadata} == {
+        "hy273_unified_actor_checkpoint_v1"
+    }
+    assert [row["expected_treatment_label"] for row in metadata] == [
+        "t2m",
+        "t2m_edit_interaction",
+    ]
+
+
+def test_same_source_eval_accepts_same_run_continuation_schedule_extension(
+    tmp_path: Path,
+) -> None:
+    stage_a = tmp_path / "stage_a_100k.pt"
+    stage_b = tmp_path / "stage_b_250k.pt"
+    _write_unified_actor_checkpoint(stage_a, step=100000)
+    _write_unified_actor_checkpoint(stage_b, step=250000)
+    checkpoint = torch.load(stage_b, map_location="cpu", weights_only=False)
+    checkpoint["config"]["schedule"]["segments"][-1]["end"] = 250000
+    checkpoint["config"]["training"]["max_global_step"] = 250000
+    torch.save(checkpoint, stage_b)
+
+    metadata = validate_checkpoint_systems(
+        [("stage_a", stage_a), ("stage_b", stage_b)],
+        expectations={
+            "stage_a": (100000, "t2m"),
+            "stage_b": (250000, "t2m_edit_interaction"),
+        },
+        weight_source="ema",
+    )
+    assert [row["step"] for row in metadata] == [100000, 250000]
+
+
+def test_same_source_eval_rejects_unified_normalizer_scale_mismatch(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "eps_1e5.pt"
+    second = tmp_path / "eps_1e4.pt"
+    _write_unified_actor_checkpoint(first, step=100000, variance_eps=1e-5)
+    _write_unified_actor_checkpoint(second, step=200000, variance_eps=1e-4)
+
+    with pytest.raises(
+        RuntimeError, match="different resolved scientific configs"
+    ):
+        validate_checkpoint_systems(
+            [("first", first), ("second", second)],
+            expectations={
+                "first": (100000, "t2m"),
+                "second": (200000, "multitask"),
+            },
+            weight_source="ema",
+        )
+
+
+def test_same_source_eval_rejects_mixed_legacy_unified_comparison(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "legacy.pt"
+    unified = tmp_path / "unified.pt"
+    _write_continuation_checkpoint(
+        legacy,
+        step=450000,
+        treatment="legacy",
+        parent=None,
+    )
+    _write_unified_actor_checkpoint(unified, step=100000)
+
+    with pytest.raises(RuntimeError, match="Mixed legacy/unified"):
+        validate_checkpoint_systems(
+            [("legacy", legacy), ("unified", unified)],
+            expectations={
+                "legacy": (450000, "legacy"),
+                "unified": (100000, "t2m"),
+            },
+            weight_source="model",
+        )
+
+
+def test_same_source_eval_rejects_unrelated_unified_runs(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "run_a.pt"
+    second = tmp_path / "run_b.pt"
+    _write_unified_actor_checkpoint(first, step=100000, run_name="run_a")
+    _write_unified_actor_checkpoint(second, step=200000, run_name="run_b")
+
+    with pytest.raises(RuntimeError, match="same training run"):
+        validate_checkpoint_systems(
+            [("first", first), ("second", second)],
+            expectations={
+                "first": (100000, "t2m"),
+                "second": (200000, "multitask"),
+            },
+            weight_source="ema",
+        )
 
 
 def test_same_source_eval_accepts_explicit_matched_continuations(
@@ -554,7 +787,7 @@ def test_same_source_eval_accepts_explicit_matched_continuations(
     additive = tmp_path / "additive425.pt"
     token = tmp_path / "token425.pt"
     _write_continuation_checkpoint(
-        root, step=400000, treatment="", parent=None
+        root, step=400000, treatment="formal_default", parent=None
     )
     _write_continuation_checkpoint(
         additive_parent,
@@ -603,6 +836,39 @@ def test_same_source_eval_accepts_explicit_matched_continuations(
     assert {row["common_fork_parent"] for row in metadata} == {
         str(root.resolve())
     }
+
+
+def test_same_source_eval_accepts_named_default_as_compared_parent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "parent200.pt"
+    candidate = tmp_path / "edit210.pt"
+    _write_continuation_checkpoint(
+        root,
+        step=200000,
+        treatment="formal_default",
+        parent=None,
+        null_parent=True,
+    )
+    _write_continuation_checkpoint(
+        candidate,
+        step=210000,
+        treatment="no_rank_positive_only",
+        parent=root,
+    )
+
+    metadata = validate_checkpoint_systems(
+        [("parent", root), ("candidate", candidate)],
+        expectations={
+            "parent": (200000, "formal_default"),
+            "candidate": (210000, "no_rank_positive_only"),
+        },
+        weight_source="model",
+    )
+
+    rows = {row["label"]: row for row in metadata}
+    assert rows["parent"]["parent"] is None
+    assert rows["candidate"]["parent"] == str(root.resolve())
 
 
 def test_same_source_eval_accepts_direct_and_resumed_common_fork_branches(

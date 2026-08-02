@@ -453,13 +453,16 @@ def collate_hy273_multitask(samples: Sequence[dict[str, Any]]) -> dict[str, Any]
         ),
         target_to_source_time_map=None,
     )
-    has_source_free_edit = bool(
+    has_source_free_conditional = bool(
         (
-            (condition.task_id == int(TaskId.EDIT))
+            (
+                (condition.task_id == int(TaskId.EDIT))
+                | (condition.task_id == int(TaskId.REACTION))
+            )
             & ~condition.source_present.any(dim=1)
         ).any()
     )
-    condition.validate(v1_strict=not has_source_free_edit)
+    condition.validate(v1_strict=not has_source_free_conditional)
     return {
         "target_motion": target,
         "condition": condition,

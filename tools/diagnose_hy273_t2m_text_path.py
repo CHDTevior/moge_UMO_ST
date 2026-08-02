@@ -38,6 +38,10 @@ from models.raw_motion.hytext_cache import LLM2VEC_CACHE_FORMAT
 from models.raw_motion.text_condition import RawTextCondition
 from sample_hy273_multitask import normalizer_from_checkpoint
 from tools.eval_hy273_text_paraphrase_panel import _encode_missing_texts
+from tools.hy273_runtime_text_encoding import (
+    RuntimeTextRows,
+    register_runtime_text_rows,
+)
 from train_hy273_multitask import create_model_from_checkpoint
 
 
@@ -177,7 +181,7 @@ def diagnose_checkpoint(
     label: str,
     path: Path,
     *,
-    runtime_rows: tuple[Any, ...],
+    runtime_rows: RuntimeTextRows,
     target: torch.Tensor,
     timesteps: tuple[float, ...],
     seed: int,
@@ -191,14 +195,11 @@ def diagnose_checkpoint(
     checkpoint_step = int(checkpoint["next_global_step"])
     del checkpoint
 
-    runtime_texts, runtime_vtxt, runtime_ctxt, runtime_lengths = runtime_rows
-    if runtime_texts:
-        model.text_encoder.cache.add_runtime_rows(
-            runtime_texts,
-            runtime_vtxt,
-            runtime_ctxt,
-            runtime_lengths,
-            profiles=[ABSOLUTE_TEXT_PROFILE] * len(runtime_texts),
+    if runtime_rows.count:
+        register_runtime_text_rows(
+            model.text_encoder.cache,
+            runtime_rows,
+            context_cache=getattr(model.text_encoder, "context_cache", None),
         )
     model = model.to(device).eval()
     model.requires_grad_(False)
@@ -592,7 +593,7 @@ def main() -> None:
     device = torch.device(args.device)
     timesteps = tuple(float(value) for value in args.timesteps.split(","))
     target = load_target(Path(args.target_motion), int(args.max_frames))
-    runtime_rows_by_contract: dict[tuple[str, str, str], tuple[Any, ...]] = {}
+    runtime_rows_by_contract: dict[tuple[str, ...], RuntimeTextRows] = {}
     models = []
     for label, path in args.checkpoint:
         checkpoint = torch.load(
@@ -600,14 +601,21 @@ def main() -> None:
         )
         probe_model = create_model_from_checkpoint(checkpoint)
         cache = probe_model.text_encoder.cache
+        context_cache = getattr(probe_model.text_encoder, "context_cache", None)
+        context_manifest = (
+            {} if context_cache is None else context_cache.manifest
+        )
         contract = (
             str(cache.manifest.get("format", "")),
             str(cache.manifest.get("encoder_identity", "")),
             str(cache.manifest.get("prompt_template_version", "")),
+            str(context_manifest.get("format", "")),
+            str(context_manifest.get("encoder_identity", "")),
+            str(context_manifest.get("prompt_template_version", "")),
         )
         if contract not in runtime_rows_by_contract:
             runtime_rows_by_contract[contract] = _encode_missing_texts(
-                cache,
+                probe_model.text_encoder,
                 [text for _, text in PROMPTS],
                 device,
             )

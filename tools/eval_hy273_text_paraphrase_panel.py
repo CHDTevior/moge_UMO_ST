@@ -22,9 +22,16 @@ from models.raw_motion.hy273_multitask_condition import (
     make_absent_condition,
 )
 from models.raw_motion.hy273_slices import DIM_HY273, reconstruct_global_joints_from_features
-from sample_hy273_multitask import normalizer_from_checkpoint, sample_hy273_multitask_ode
-from tools.hy273_runtime_text_encoding import encode_missing_text_rows
-from train_hy273_multitask import create_model_from_checkpoint
+from sample_hy273_multitask import (
+    create_model_from_checkpoint,
+    normalizer_from_checkpoint,
+    sample_hy273_multitask_ode,
+)
+from tools.hy273_runtime_text_encoding import (
+    RuntimeTextRows,
+    encode_missing_text_rows,
+    register_runtime_text_rows,
+)
 
 
 PROMPTS = (
@@ -36,16 +43,19 @@ PROMPTS = (
 )
 
 
-def _encode_missing_texts(cache, texts: list[str], device: torch.device):
-    rows = encode_missing_text_rows(
-        cache,
+def _encode_missing_texts(
+    text_encoder,
+    texts: list[str],
+    device: torch.device,
+) -> RuntimeTextRows:
+    context_cache = getattr(text_encoder, "context_cache", None)
+    return encode_missing_text_rows(
+        text_encoder.cache,
         texts,
         [ABSOLUTE_TEXT_PROFILE] * len(texts),
         device,
+        context_cache=context_cache,
     )
-    if not rows.count:
-        return ([], None, None, None)
-    return (list(rows.texts), rows.vtxt, rows.ctxt, rows.lengths)
 
 
 def _parse_checkpoint(value: str) -> tuple[str, Path]:
@@ -161,7 +171,7 @@ def main() -> None:
     observed = torch.zeros(1, length, DIM_HY273)
     mask = torch.zeros_like(observed, dtype=torch.bool)
     all_results: dict[str, dict] = {}
-    runtime_rows_by_contract: dict[tuple[str, str, str], tuple] = {}
+    runtime_rows_by_contract: dict[tuple[str, ...], RuntimeTextRows] = {}
 
     for checkpoint_label, checkpoint_path in args.checkpoint:
         checkpoint = torch.load(
@@ -173,26 +183,30 @@ def main() -> None:
         model.eval()
         normalizer = normalizer_from_checkpoint(checkpoint, device)
         text_cache = model.text_encoder.cache
+        context_cache = getattr(model.text_encoder, "context_cache", None)
+        context_manifest = (
+            {} if context_cache is None else context_cache.manifest
+        )
         runtime_contract = (
             str(text_cache.manifest.get("format", "")),
             str(text_cache.manifest.get("encoder_identity", "")),
             str(text_cache.manifest.get("prompt_template_version", "")),
+            str(context_manifest.get("format", "")),
+            str(context_manifest.get("encoder_identity", "")),
+            str(context_manifest.get("prompt_template_version", "")),
         )
         if runtime_contract not in runtime_rows_by_contract:
             runtime_rows_by_contract[runtime_contract] = _encode_missing_texts(
-                text_cache,
+                model.text_encoder,
                 [text for _, text in PROMPTS],
                 device,
             )
         runtime_rows = runtime_rows_by_contract[runtime_contract]
-        runtime_texts, runtime_vtxt, runtime_ctxt, runtime_lengths = runtime_rows
-        if runtime_texts:
-            text_cache.add_runtime_rows(
-                runtime_texts,
-                runtime_vtxt,
-                runtime_ctxt,
-                runtime_lengths,
-                profiles=[ABSOLUTE_TEXT_PROFILE] * len(runtime_texts),
+        if runtime_rows.count:
+            register_runtime_text_rows(
+                text_cache,
+                runtime_rows,
+                context_cache=context_cache,
             )
 
         ordered_samples: list[np.ndarray] = []
@@ -217,7 +231,9 @@ def main() -> None:
                         text_cfg_scale=float(args.cfg_scale),
                         contact_init="random",
                         contact_feedback="blend",
-                        cfg_apply_contacts=False,
+                        cfg_apply_contacts=(
+                            None if normalizer.normalize_contacts else False
+                        ),
                         generator=generator,
                     )
                     motion = sampled.raw_motion[0].detach().cpu().float()

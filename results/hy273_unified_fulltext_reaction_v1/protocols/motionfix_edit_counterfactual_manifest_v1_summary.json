@@ -1,0 +1,19 @@
+{
+  "builder_code_sha256": "94ae8342049b7d1e5c7603fd03884d79289635c14dad021c6a99f3f5d9a76925",
+  "case_count": 1013,
+  "format": "motionfix_edit_counterfactual_manifest_v1",
+  "instruction_shuffle_unique_donors": 1013,
+  "jsonl_sha256": "8bc5f61a44906312c581540b65792cee0bdd03c244a24389330c8755b317e6c3",
+  "rows_sha256": "09383f5819e4eb64d79383644c8c4c66d67aa87f85577910615b483e30a448f1",
+  "seed": 3407,
+  "source_shuffle_fail_closed_cases": 1,
+  "source_shuffle_fail_closed_uids": [
+    "motionfix:002794"
+  ],
+  "source_shuffle_matched_cases": 1012,
+  "source_shuffle_unique_donors": 1012,
+  "status": "passed",
+  "test_manifest": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/test.jsonl",
+  "test_manifest_sha256": "abc1557bfb49083d191c55c8b06d0a91993076824fecfc3be88f3bb00a3ad9e4",
+  "text_normalizer": "unicode_preserving_whitespace_collapse_v1"
+}
