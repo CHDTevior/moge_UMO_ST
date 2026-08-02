@@ -1,0 +1,210 @@
+{
+  "format": "hy273_dynamic_edit_eval_v1",
+  "status": "completed",
+  "labels": [
+    "parent250k_cfg2",
+    "final400k_cfg2",
+    "final400k_cfg3",
+    "final400k_cfg4",
+    "final400k_cfg5",
+    "final400k_cfg6"
+  ],
+  "selection": {
+    "format": "hy273_dynamic_edit_eval_v1",
+    "manifest": "/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1/val.jsonl",
+    "selection_seed": 20260724,
+    "max_frames": 300,
+    "limit_per_category": 3,
+    "eligible_counts": {
+      "requested": 3
+    },
+    "selected_by_category": {
+      "requested": [
+        "004884",
+        "002493",
+        "001866"
+      ]
+    },
+    "selected_pairs": [
+      {
+        "pair_id": "004884",
+        "categories": [
+          "requested"
+        ],
+        "instruction": "stand on your toes, don't touch your hands, keep them as wide as your shoulders. move from left to right and look up at the end",
+        "frames": 120
+      },
+      {
+        "pair_id": "002493",
+        "categories": [
+          "requested"
+        ],
+        "instruction": "keep hands raised longer and sit down on a chair instead of on the floor",
+        "frames": 120
+      },
+      {
+        "pair_id": "001866",
+        "categories": [
+          "requested"
+        ],
+        "instruction": "wave right leg",
+        "frames": 90
+      }
+    ]
+  },
+  "category_summary": {
+    "requested": {
+      "parent250k_cfg2": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 0.40416937073071796,
+          "global_joint_target_error_m": 0.15725325047969818,
+          "velocity_target_mae_mps": 0.12270091225703557,
+          "speed_target_mae_mps": 0.17618280152479807,
+          "mean_speed_alignment/direction_accuracy": 0.7543859649122807,
+          "mean_speed_alignment/mean_progress": 0.4830287053798095,
+          "mean_speed_alignment/target_relative_error": 0.5935586407025703,
+          "peak_count_alignment/direction_accuracy": 0.7064393939393939,
+          "peak_count_alignment/mean_progress": 0.4723319504569505,
+          "peak_count_alignment/target_relative_error": 0.548501382876383,
+          "activity_center_alignment/direction_accuracy": 0.8609986504723347,
+          "activity_center_alignment/mean_progress": 1.0368851820891873,
+          "activity_center_alignment/target_relative_error": 0.9030254388038897,
+          "activity_onset_alignment/direction_accuracy": 0.706766917293233,
+          "activity_onset_alignment/mean_progress": 0.47249435232702924,
+          "activity_onset_alignment/target_relative_error": 0.6854018462540793,
+          "activity_offset_alignment/direction_accuracy": 0.7053872053872053,
+          "activity_offset_alignment/mean_progress": 0.4706708431799009,
+          "activity_offset_alignment/target_relative_error": 1.1445334774592018
+        }
+      },
+      "final400k_cfg2": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 0.3571612536907196,
+          "global_joint_target_error_m": 0.14236526439587274,
+          "velocity_target_mae_mps": 0.11276105046272278,
+          "speed_target_mae_mps": 0.15428282072146735,
+          "mean_speed_alignment/direction_accuracy": 0.8070175438596491,
+          "mean_speed_alignment/mean_progress": 0.5575747265232466,
+          "mean_speed_alignment/target_relative_error": 0.47589639322435784,
+          "peak_count_alignment/direction_accuracy": 0.6387626262626263,
+          "peak_count_alignment/mean_progress": 0.47089345839345836,
+          "peak_count_alignment/target_relative_error": 0.71509139009139,
+          "activity_center_alignment/direction_accuracy": 0.9392712550607287,
+          "activity_center_alignment/mean_progress": 1.1323134507549415,
+          "activity_center_alignment/target_relative_error": 0.6930278613542518,
+          "activity_onset_alignment/direction_accuracy": 0.9172932330827068,
+          "activity_onset_alignment/mean_progress": 1.1115700715277372,
+          "activity_onset_alignment/target_relative_error": 0.46151187529159615,
+          "activity_offset_alignment/direction_accuracy": 0.7424242424242425,
+          "activity_offset_alignment/mean_progress": 0.7099455345379259,
+          "activity_offset_alignment/target_relative_error": 0.8883876942300853
+        }
+      },
+      "final400k_cfg3": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 1.332526683807373,
+          "global_joint_target_error_m": 0.22958186268806458,
+          "velocity_target_mae_mps": 0.20369933545589447,
+          "speed_target_mae_mps": 0.2862687110900879,
+          "mean_speed_alignment/direction_accuracy": 0.9220779220779222,
+          "mean_speed_alignment/mean_progress": 0.7567570492807443,
+          "mean_speed_alignment/target_relative_error": 1.0859871216658175,
+          "peak_count_alignment/direction_accuracy": 0.628030303030303,
+          "peak_count_alignment/mean_progress": 0.5431277056277056,
+          "peak_count_alignment/target_relative_error": 0.9471500721500722,
+          "activity_center_alignment/direction_accuracy": 0.6139676113360323,
+          "activity_center_alignment/mean_progress": 0.25719059020566676,
+          "activity_center_alignment/target_relative_error": 0.8504489597868244,
+          "activity_onset_alignment/direction_accuracy": 0.5271929824561403,
+          "activity_onset_alignment/mean_progress": 0.22502011105615716,
+          "activity_onset_alignment/target_relative_error": 0.9954213480695125,
+          "activity_offset_alignment/direction_accuracy": 0.5202020202020202,
+          "activity_offset_alignment/mean_progress": 0.28173500881834207,
+          "activity_offset_alignment/target_relative_error": 0.9962471941638608
+        }
+      },
+      "final400k_cfg4": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 3.3043684164683023,
+          "global_joint_target_error_m": 0.3769395351409912,
+          "velocity_target_mae_mps": 0.36915746331214905,
+          "speed_target_mae_mps": 0.5874171058336893,
+          "mean_speed_alignment/direction_accuracy": 0.6190476190476191,
+          "mean_speed_alignment/mean_progress": 0.42805331969468496,
+          "mean_speed_alignment/target_relative_error": 2.5091155957722027,
+          "peak_count_alignment/direction_accuracy": 0.5840909090909091,
+          "peak_count_alignment/mean_progress": 0.510813492063492,
+          "peak_count_alignment/target_relative_error": 1.0086309523809522,
+          "activity_center_alignment/direction_accuracy": 0.498110661268556,
+          "activity_center_alignment/mean_progress": 0.22103674345474364,
+          "activity_center_alignment/target_relative_error": 1.3514421197123785,
+          "activity_onset_alignment/direction_accuracy": 0.48078529657477026,
+          "activity_onset_alignment/mean_progress": 0.08518706737449015,
+          "activity_onset_alignment/target_relative_error": 1.0774504413156503,
+          "activity_offset_alignment/direction_accuracy": 0.4566498316498316,
+          "activity_offset_alignment/mean_progress": 0.09310184749496346,
+          "activity_offset_alignment/target_relative_error": 1.1912990977755473
+        }
+      },
+      "final400k_cfg5": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 5.593361934026082,
+          "global_joint_target_error_m": 0.5148504078388214,
+          "velocity_target_mae_mps": 0.5252567778031031,
+          "speed_target_mae_mps": 0.8894100983937582,
+          "mean_speed_alignment/direction_accuracy": 0.6190476190476191,
+          "mean_speed_alignment/mean_progress": 0.5217381198052216,
+          "mean_speed_alignment/target_relative_error": 3.83041774270295,
+          "peak_count_alignment/direction_accuracy": 0.6674242424242425,
+          "peak_count_alignment/mean_progress": 0.576984126984127,
+          "peak_count_alignment/target_relative_error": 0.8382936507936508,
+          "activity_center_alignment/direction_accuracy": 0.2655195681511471,
+          "activity_center_alignment/mean_progress": -0.35481595685895817,
+          "activity_center_alignment/target_relative_error": 1.5504674788262696,
+          "activity_onset_alignment/direction_accuracy": 0.5117376775271513,
+          "activity_onset_alignment/mean_progress": 0.11091157658595496,
+          "activity_onset_alignment/target_relative_error": 1.1021002933667046,
+          "activity_offset_alignment/direction_accuracy": 0.489057239057239,
+          "activity_offset_alignment/mean_progress": 0.0752158620365141,
+          "activity_offset_alignment/target_relative_error": 1.3165668721375245
+        }
+      },
+      "final400k_cfg6": {
+        "pairs": 3,
+        "metrics": {
+          "continuous_target_mse": 8.249879042307535,
+          "global_joint_target_error_m": 0.5675215820471445,
+          "velocity_target_mae_mps": 0.6528512934843699,
+          "speed_target_mae_mps": 1.1414595544338226,
+          "mean_speed_alignment/direction_accuracy": 0.6190476190476191,
+          "mean_speed_alignment/mean_progress": 0.5925791520376188,
+          "mean_speed_alignment/target_relative_error": 4.831441776588394,
+          "peak_count_alignment/direction_accuracy": 0.6092171717171717,
+          "peak_count_alignment/mean_progress": 0.3904972342472342,
+          "peak_count_alignment/target_relative_error": 1.1761694324194325,
+          "activity_center_alignment/direction_accuracy": 0.2663967611336033,
+          "activity_center_alignment/mean_progress": -0.5351705943672604,
+          "activity_center_alignment/target_relative_error": 1.7837348468788814,
+          "activity_onset_alignment/direction_accuracy": 0.49753550543024233,
+          "activity_onset_alignment/mean_progress": 0.03836883546461508,
+          "activity_onset_alignment/target_relative_error": 1.225166502248354,
+          "activity_offset_alignment/direction_accuracy": 0.4057239057239057,
+          "activity_offset_alignment/mean_progress": 0.1576677968435215,
+          "activity_offset_alignment/target_relative_error": 1.3491190153780732
+        }
+      }
+    }
+  },
+  "pair_000038": null,
+  "visual_pair_ids": [
+    "004884",
+    "002493",
+    "001866"
+  ],
+  "record_count": 18
+}

@@ -1,0 +1,334 @@
+{
+  "models": {
+    "stageBC400k_raw": {
+      "aggregate": {
+        "canonical_vs_counterfactual": {
+          "feature_rmse": {
+            "mean": 0.4642331103483836,
+            "std": 0.05752980749298312
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.9961338440577189,
+            "std": 0.10370543391328274
+          },
+          "root_path_l2_m": {
+            "mean": 0.9873716632525126,
+            "std": 0.09905728534920046
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.15387113144000372,
+            "std": 0.031284927634286634
+          }
+        },
+        "canonical_vs_empty": {
+          "feature_rmse": {
+            "mean": 0.41257424155871075,
+            "std": 0.0576717200872992
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.6198075811068217,
+            "std": 0.34312096268026593
+          },
+          "root_path_l2_m": {
+            "mean": 0.6131096730629603,
+            "std": 0.3588555656623228
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.1384003534913063,
+            "std": 0.02545493902938609
+          }
+        },
+        "gerund_routing": {
+          "feature_rmse": {
+            "mean": 0.13455428183078766,
+            "std": 0.06494212310779626
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.40227925032377243,
+            "std": 0.2748981679141914
+          },
+          "root_path_l2_m": {
+            "mean": 0.4137524614731471,
+            "std": 0.30093809366651836
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.03516170755028725,
+            "std": 0.02941515524272164
+          }
+        },
+        "gerund_vs_canonical": {
+          "feature_rmse": {
+            "mean": 0.23940206070741019,
+            "std": 0.11132595177638788
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.15392267952362695,
+            "std": 0.07207748127407011
+          },
+          "root_path_l2_m": {
+            "mean": 0.13191829125086466,
+            "std": 0.04880017492465886
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.07850780213872592,
+            "std": 0.04003304837770258
+          }
+        },
+        "gerund_vs_empty": {
+          "feature_rmse": {
+            "mean": 0.3739563425381978,
+            "std": 0.04670292290310302
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.5562019298473994,
+            "std": 0.3147148730908581
+          },
+          "root_path_l2_m": {
+            "mean": 0.5456707527240118,
+            "std": 0.3337084590977005
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.11366950968901317,
+            "std": 0.010617896214402026
+          }
+        },
+        "verb_routing": {
+          "feature_rmse": {
+            "mean": 0.20642409225304922,
+            "std": 0.027657432020215193
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.34840711454550427,
+            "std": 0.3271940065230723
+          },
+          "root_path_l2_m": {
+            "mean": 0.3278725941975911,
+            "std": 0.3497149522548635
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.08118483051657677,
+            "std": 0.008285617934139008
+          }
+        },
+        "verb_vs_canonical": {
+          "feature_rmse": {
+            "mean": 0.2645051529010137,
+            "std": 0.13362097035028686
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.2670489897330602,
+            "std": 0.12232664146229798
+          },
+          "root_path_l2_m": {
+            "mean": 0.2514977951844533,
+            "std": 0.11428237713972718
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.09439066176613171,
+            "std": 0.06592474501098798
+          }
+        },
+        "verb_vs_empty": {
+          "feature_rmse": {
+            "mean": 0.4709292451540629,
+            "std": 0.10996609972206138
+          },
+          "joint_mpjpe_m": {
+            "mean": 0.6154561042785645,
+            "std": 0.32321627038925627
+          },
+          "root_path_l2_m": {
+            "mean": 0.5793703893820444,
+            "std": 0.3235601021851225
+          },
+          "root_relative_mpjpe_m": {
+            "mean": 0.1755754922827085,
+            "std": 0.06962358291739909
+          }
+        }
+      },
+      "checkpoint": "/mnt/afs/mogeflow-control/outputs/hy273_text_fusion/hy273_kencoder_stageBC_ease_t2m10_ctrl70_edit20_ddp8x16_20260728_201555/model/step_00400000.pt",
+      "checkpoint_step": 400000,
+      "per_seed": [
+        {
+          "comparisons": {
+            "canonical_vs_counterfactual": {
+              "feature_rmse": 0.48400890827178955,
+              "joint_mpjpe_m": 1.115602970123291,
+              "root_path_l2_m": 1.1010807752609253,
+              "root_relative_mpjpe_m": 0.15454766154289246
+            },
+            "canonical_vs_empty": {
+              "feature_rmse": 0.4697096049785614,
+              "joint_mpjpe_m": 0.829902172088623,
+              "root_path_l2_m": 0.8219906687736511,
+              "root_relative_mpjpe_m": 0.15737347304821014
+            },
+            "gerund_routing": {
+              "feature_rmse": 0.0638279914855957,
+              "joint_mpjpe_m": 0.5110177993774414,
+              "root_path_l2_m": 0.561661884188652,
+              "root_relative_mpjpe_m": 0.006547003984451294
+            },
+            "gerund_vs_canonical": {
+              "feature_rmse": 0.35765740275382996,
+              "joint_mpjpe_m": 0.23645001649856567,
+              "root_path_l2_m": 0.18667913973331451,
+              "root_relative_mpjpe_m": 0.1174573302268982
+            },
+            "gerund_vs_empty": {
+              "feature_rmse": 0.42148539423942566,
+              "joint_mpjpe_m": 0.7474678158760071,
+              "root_path_l2_m": 0.7483410239219666,
+              "root_relative_mpjpe_m": 0.12400433421134949
+            },
+            "verb_routing": {
+              "feature_rmse": 0.17476356029510498,
+              "joint_mpjpe_m": 0.24064680933952332,
+              "root_path_l2_m": 0.17836183309555054,
+              "root_relative_mpjpe_m": 0.08243611454963684
+            },
+            "verb_vs_canonical": {
+              "feature_rmse": 0.4090699553489685,
+              "joint_mpjpe_m": 0.4079713523387909,
+              "root_path_l2_m": 0.3834457993507385,
+              "root_relative_mpjpe_m": 0.1676308512687683
+            },
+            "verb_vs_empty": {
+              "feature_rmse": 0.5838335156440735,
+              "joint_mpjpe_m": 0.6486181616783142,
+              "root_path_l2_m": 0.5618076324462891,
+              "root_relative_mpjpe_m": 0.25006696581840515
+            }
+          },
+          "seed": 3407
+        },
+        {
+          "comparisons": {
+            "canonical_vs_counterfactual": {
+              "feature_rmse": 0.5092666745185852,
+              "joint_mpjpe_m": 0.9293166995048523,
+              "root_path_l2_m": 0.9197921752929688,
+              "root_relative_mpjpe_m": 0.18481230735778809
+            },
+            "canonical_vs_empty": {
+              "feature_rmse": 0.4136323928833008,
+              "joint_mpjpe_m": 0.8056678175926208,
+              "root_path_l2_m": 0.818594753742218,
+              "root_relative_mpjpe_m": 0.14835523068904877
+            },
+            "gerund_routing": {
+              "feature_rmse": 0.14833448827266693,
+              "joint_mpjpe_m": 0.6061752438545227,
+              "root_path_l2_m": 0.6121134459972382,
+              "root_relative_mpjpe_m": 0.03362133353948593
+            },
+            "gerund_vs_canonical": {
+              "feature_rmse": 0.22392325103282928,
+              "joint_mpjpe_m": 0.12199133634567261,
+              "root_path_l2_m": 0.11604413390159607,
+              "root_relative_mpjpe_m": 0.08059331774711609
+            },
+            "gerund_vs_empty": {
+              "feature_rmse": 0.3722577393054962,
+              "joint_mpjpe_m": 0.7281665802001953,
+              "root_path_l2_m": 0.7281575798988342,
+              "root_relative_mpjpe_m": 0.11421465128660202
+            },
+            "verb_routing": {
+              "feature_rmse": 0.2258794903755188,
+              "joint_mpjpe_m": 0.7158900499343872,
+              "root_path_l2_m": 0.727490171790123,
+              "root_relative_mpjpe_m": 0.08877363801002502
+            },
+            "verb_vs_canonical": {
+              "feature_rmse": 0.23891672492027283,
+              "joint_mpjpe_m": 0.2049228549003601,
+              "root_path_l2_m": 0.18386401236057281,
+              "root_relative_mpjpe_m": 0.07574215531349182
+            },
+            "verb_vs_empty": {
+              "feature_rmse": 0.4647962152957916,
+              "joint_mpjpe_m": 0.9208129048347473,
+              "root_path_l2_m": 0.9113541841506958,
+              "root_relative_mpjpe_m": 0.16451579332351685
+            }
+          },
+          "seed": 12345
+        },
+        {
+          "comparisons": {
+            "canonical_vs_counterfactual": {
+              "feature_rmse": 0.399423748254776,
+              "joint_mpjpe_m": 0.9434818625450134,
+              "root_path_l2_m": 0.9412420392036438,
+              "root_relative_mpjpe_m": 0.1222534254193306
+            },
+            "canonical_vs_empty": {
+              "feature_rmse": 0.35438072681427,
+              "joint_mpjpe_m": 0.2238527536392212,
+              "root_path_l2_m": 0.19874359667301178,
+              "root_relative_mpjpe_m": 0.10947235673666
+            },
+            "gerund_routing": {
+              "feature_rmse": 0.19150036573410034,
+              "joint_mpjpe_m": 0.08964470773935318,
+              "root_path_l2_m": 0.06748205423355103,
+              "root_relative_mpjpe_m": 0.06531678512692451
+            },
+            "gerund_vs_canonical": {
+              "feature_rmse": 0.1366255283355713,
+              "joint_mpjpe_m": 0.10332668572664261,
+              "root_path_l2_m": 0.09303160011768341,
+              "root_relative_mpjpe_m": 0.03747275844216347
+            },
+            "gerund_vs_empty": {
+              "feature_rmse": 0.32812589406967163,
+              "joint_mpjpe_m": 0.1929713934659958,
+              "root_path_l2_m": 0.16051365435123444,
+              "root_relative_mpjpe_m": 0.10278954356908798
+            },
+            "verb_routing": {
+              "feature_rmse": 0.21862922608852386,
+              "joint_mpjpe_m": 0.08868448436260223,
+              "root_path_l2_m": 0.07776577770709991,
+              "root_relative_mpjpe_m": 0.07234473899006844
+            },
+            "verb_vs_canonical": {
+              "feature_rmse": 0.14552877843379974,
+              "joint_mpjpe_m": 0.1882527619600296,
+              "root_path_l2_m": 0.18718357384204865,
+              "root_relative_mpjpe_m": 0.039798978716135025
+            },
+            "verb_vs_empty": {
+              "feature_rmse": 0.3641580045223236,
+              "joint_mpjpe_m": 0.27693724632263184,
+              "root_path_l2_m": 0.26494935154914856,
+              "root_relative_mpjpe_m": 0.11214371770620346
+            }
+          },
+          "seed": 20260725
+        }
+      ]
+    }
+  },
+  "protocol": {
+    "matched_noise_per_seed": true,
+    "num_steps": 32,
+    "prompts": {
+      "canonical": "a person is break dancing.",
+      "counterfactual_walk": "a person is walking slowly.",
+      "empty": "",
+      "paraphrase_gerund": "a person is breaking dance.",
+      "paraphrase_verb": "a person breakdances."
+    },
+    "seeds": [
+      3407,
+      12345,
+      20260725
+    ],
+    "target_length": 150,
+    "text_cfg_scale": 2.0,
+    "weight_source": "raw"
+  }
+}

@@ -1,0 +1,19 @@
+base_config: hy273_multitask_r13_unified273_base.yaml
+
+stage:
+  name: stage_bc_kencoder_ease_control
+  expected_start_step: 250000
+  stop_step: 400000
+  phase_id: 2
+  schedule_version: hy273_kencoder_stage_bc_fixed_10_70_20_ease_v1
+
+edit_objective:
+  target_x0_scale: 0.05
+  hard_x0_scale: 0.02
+  hard_fraction: 0.20
+  instruction_rank_scale: 0.0
+  instruction_relative_margin: 0.10
+
+ease:
+  enabled: true
+  stats_dir: /mnt/afs/mogo_base/datasets/HY273_multitask_v1/derived_stats/hy273_ease_stats_v1

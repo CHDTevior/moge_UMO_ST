@@ -1,0 +1,237 @@
+{
+  "aggregate": {
+    "fk_jerk_mps3": 63.53747296333313,
+    "foot_contact_consistency": 0.9636199213564396,
+    "foot_skate_from_height": 0.5322340335696936,
+    "foot_skate_from_pred_contacts": 0.05493810516782105,
+    "foot_skate_max_vel": 0.19804340787231922,
+    "foot_skate_ratio": 0.3304422994842753,
+    "position_channel_jerk_mps3": 63.17570501565933
+  },
+  "per_sample": [
+    {
+      "index": 0,
+      "length": 300,
+      "metrics": {
+        "fk_jerk_mps3": 67.6025619506836,
+        "foot_contact_consistency": 1.0,
+        "foot_skate_from_height": 1.1863605976104736,
+        "foot_skate_from_pred_contacts": 0.0,
+        "foot_skate_max_vel": 0.0,
+        "foot_skate_ratio": 1.0,
+        "position_channel_jerk_mps3": 67.7912826538086
+      },
+      "text": "a person is walking in place at a slow pace."
+    },
+    {
+      "index": 1,
+      "length": 94,
+      "metrics": {
+        "fk_jerk_mps3": 61.52058410644531,
+        "foot_contact_consistency": 0.9112903475761414,
+        "foot_skate_from_height": 0.0693846344947815,
+        "foot_skate_from_pred_contacts": 0.06371290981769562,
+        "foot_skate_max_vel": 0.2568044066429138,
+        "foot_skate_ratio": 0.02150537632405758,
+        "position_channel_jerk_mps3": 62.30557632446289
+      },
+      "text": "the person swings a golf club."
+    },
+    {
+      "index": 2,
+      "length": 97,
+      "metrics": {
+        "fk_jerk_mps3": 60.971920013427734,
+        "foot_contact_consistency": 0.9921875,
+        "foot_skate_from_height": 0.2569696307182312,
+        "foot_skate_from_pred_contacts": 0.05982409790158272,
+        "foot_skate_max_vel": 0.22005122900009155,
+        "foot_skate_ratio": 0.28205129504203796,
+        "position_channel_jerk_mps3": 60.81395721435547
+      },
+      "text": "the man runs back wards"
+    },
+    {
+      "index": 3,
+      "length": 201,
+      "metrics": {
+        "fk_jerk_mps3": 103.50086212158203,
+        "foot_contact_consistency": 0.8999999761581421,
+        "foot_skate_from_height": 0.7781935334205627,
+        "foot_skate_from_pred_contacts": 0.08655741810798645,
+        "foot_skate_max_vel": 0.24453842639923096,
+        "foot_skate_ratio": 0.3588850200176239,
+        "position_channel_jerk_mps3": 102.70133209228516
+      },
+      "text": "a man walks forward, then squats to pick something up with both hands, stands back up, and resumes walking."
+    },
+    {
+      "index": 4,
+      "length": 124,
+      "metrics": {
+        "fk_jerk_mps3": 22.307395935058594,
+        "foot_contact_consistency": 1.0,
+        "foot_skate_from_height": 0.01607726886868477,
+        "foot_skate_from_pred_contacts": 0.014423413202166557,
+        "foot_skate_max_vel": 0.04703924059867859,
+        "foot_skate_ratio": 0.0,
+        "position_channel_jerk_mps3": 22.171493530273438
+      },
+      "text": "a person waves with his right hand."
+    },
+    {
+      "index": 5,
+      "length": 171,
+      "metrics": {
+        "fk_jerk_mps3": 33.81362533569336,
+        "foot_contact_consistency": 0.9779411554336548,
+        "foot_skate_from_height": 0.5687077641487122,
+        "foot_skate_from_pred_contacts": 0.035418037325143814,
+        "foot_skate_max_vel": 0.21030493080615997,
+        "foot_skate_ratio": 0.3499999940395355,
+        "position_channel_jerk_mps3": 33.54269790649414
+      },
+      "text": "a person walks towards the camera."
+    },
+    {
+      "index": 6,
+      "length": 225,
+      "metrics": {
+        "fk_jerk_mps3": 44.094364166259766,
+        "foot_contact_consistency": 0.9587053656578064,
+        "foot_skate_from_height": 0.31238001585006714,
+        "foot_skate_from_pred_contacts": 0.05527442321181297,
+        "foot_skate_max_vel": 0.24005043506622314,
+        "foot_skate_ratio": 0.1830357164144516,
+        "position_channel_jerk_mps3": 43.47205352783203
+      },
+      "text": "person is bent down trying to pick up stuff, left arm is moved to the back, picks up more stuff and touches back again while bending down"
+    },
+    {
+      "index": 7,
+      "length": 300,
+      "metrics": {
+        "fk_jerk_mps3": 79.63672637939453,
+        "foot_contact_consistency": 0.9013378024101257,
+        "foot_skate_from_height": 1.0240626335144043,
+        "foot_skate_from_pred_contacts": 0.09173484891653061,
+        "foot_skate_max_vel": 0.229427307844162,
+        "foot_skate_ratio": 0.6153846383094788,
+        "position_channel_jerk_mps3": 78.6094741821289
+      },
+      "text": "a man walks forward, then turns around and walks back before facing back and standing still."
+    },
+    {
+      "index": 8,
+      "length": 300,
+      "metrics": {
+        "fk_jerk_mps3": 32.51266098022461,
+        "foot_contact_consistency": 0.9657190442085266,
+        "foot_skate_from_height": 0.4588842988014221,
+        "foot_skate_from_pred_contacts": 0.04469578340649605,
+        "foot_skate_max_vel": 0.21685223281383514,
+        "foot_skate_ratio": 0.3177257478237152,
+        "position_channel_jerk_mps3": 32.347023010253906
+      },
+      "text": "man walks forward while upper body is leaning slightly to the left and steps are unbalanced and slow."
+    },
+    {
+      "index": 9,
+      "length": 138,
+      "metrics": {
+        "fk_jerk_mps3": 12.193294525146484,
+        "foot_contact_consistency": 1.0,
+        "foot_skate_from_height": 0.016319256275892258,
+        "foot_skate_from_pred_contacts": 0.015201946720480919,
+        "foot_skate_max_vel": 0.10030233860015869,
+        "foot_skate_ratio": 0.0,
+        "position_channel_jerk_mps3": 12.02228832244873
+      },
+      "text": "a man using both hands to lift something off ground and places it back on ground in a slightly different position"
+    },
+    {
+      "index": 10,
+      "length": 153,
+      "metrics": {
+        "fk_jerk_mps3": 45.25106430053711,
+        "foot_contact_consistency": 0.9851973652839661,
+        "foot_skate_from_height": 0.23222202062606812,
+        "foot_skate_from_pred_contacts": 0.03903213515877724,
+        "foot_skate_max_vel": 0.16302703320980072,
+        "foot_skate_ratio": 0.17213115096092224,
+        "position_channel_jerk_mps3": 45.18019104003906
+      },
+      "text": "the person walks backwards in a straight line"
+    },
+    {
+      "index": 11,
+      "length": 262,
+      "metrics": {
+        "fk_jerk_mps3": 45.962345123291016,
+        "foot_contact_consistency": 0.9607279896736145,
+        "foot_skate_from_height": 0.3393596112728119,
+        "foot_skate_from_pred_contacts": 0.06643425673246384,
+        "foot_skate_max_vel": 0.2545489966869354,
+        "foot_skate_ratio": 0.26213592290878296,
+        "position_channel_jerk_mps3": 45.17261505126953
+      },
+      "text": "man walks forward moving hands and neck."
+    },
+    {
+      "index": 12,
+      "length": 300,
+      "metrics": {
+        "fk_jerk_mps3": 30.47365951538086,
+        "foot_contact_consistency": 0.9765886068344116,
+        "foot_skate_from_height": 0.28808966279029846,
+        "foot_skate_from_pred_contacts": 0.04056960716843605,
+        "foot_skate_max_vel": 0.2638401985168457,
+        "foot_skate_ratio": 0.23037542402744293,
+        "position_channel_jerk_mps3": 29.98616600036621
+      },
+      "text": "a person walks forward to the left, picks something up and walks back and then shakes what is in the hand."
+    },
+    {
+      "index": 13,
+      "length": 60,
+      "metrics": {
+        "fk_jerk_mps3": 281.2082214355469,
+        "foot_contact_consistency": 0.9406779408454895,
+        "foot_skate_from_height": 1.8572012186050415,
+        "foot_skate_from_pred_contacts": 0.12256539613008499,
+        "foot_skate_max_vel": 0.2624337077140808,
+        "foot_skate_ratio": 0.7575757503509521,
+        "position_channel_jerk_mps3": 279.70184326171875
+      },
+      "text": "a man crouches down while quickly walking forward and then stands up straight."
+    },
+    {
+      "index": 14,
+      "length": 217,
+      "metrics": {
+        "fk_jerk_mps3": 43.84092330932617,
+        "foot_contact_consistency": 0.9710648059844971,
+        "foot_skate_from_height": 0.6991372108459473,
+        "foot_skate_from_pred_contacts": 0.06753768026828766,
+        "foot_skate_max_vel": 0.24180220067501068,
+        "foot_skate_ratio": 0.42592594027519226,
+        "position_channel_jerk_mps3": 43.279571533203125
+      },
+      "text": "a person walks forward casually with a swagger to their hips."
+    },
+    {
+      "index": 15,
+      "length": 288,
+      "metrics": {
+        "fk_jerk_mps3": 51.70935821533203,
+        "foot_contact_consistency": 0.9764808416366577,
+        "foot_skate_from_height": 0.412395179271698,
+        "foot_skate_from_pred_contacts": 0.07602772861719131,
+        "foot_skate_max_vel": 0.21767184138298035,
+        "foot_skate_ratio": 0.3103448152542114,
+        "position_channel_jerk_mps3": 51.713714599609375
+      },
+      "text": "a person walks up stairs turns left and walks back down stairs."
+    }
+  ]
+}

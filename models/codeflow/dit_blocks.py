@@ -1035,6 +1035,7 @@ class FrameMotionTextDiT(nn.Module):
         control_encoder_width: int = 512,
         control_attn_bias_init: float = -5.0,
         text_fusion_mode: str = "f00",
+        local_text_cross_attention: bool = False,
     ) -> None:
         super().__init__()
         if depth_double <= 0 or depth_single <= 0:
@@ -1047,6 +1048,7 @@ class FrameMotionTextDiT(nn.Module):
         self.rope_axes_dims = rope_axes_dims
         self.text_fusion_mode = str(text_fusion_mode).lower()
         resolve_text_fusion_mode(self.text_fusion_mode)
+        self.local_text_cross_attention = bool(local_text_cross_attention)
         self.double_blocks = nn.ModuleList([
             DoubleStreamBlock(
                 hidden_size,
@@ -1067,6 +1069,27 @@ class FrameMotionTextDiT(nn.Module):
             )
             for _ in range(depth_single)
         ])
+        with torch.random.fork_rng(devices=[]):
+            self.local_text_query_norms = nn.ModuleList(
+                [
+                    nn.LayerNorm(
+                        hidden_size,
+                        elementwise_affine=False,
+                        eps=1e-6,
+                    )
+                    for _ in range(depth_double)
+                ]
+                if self.local_text_cross_attention
+                else []
+            )
+            self.local_text_gates = nn.ParameterList(
+                [
+                    nn.Parameter(torch.zeros(()))
+                    for _ in range(depth_double)
+                ]
+                if self.local_text_cross_attention
+                else []
+            )
         self.control_input_dim = int(control_input_dim)
         self.control_layer_count = int(depth_double) + int(depth_single)
         if self.control_input_dim > 0:
@@ -1134,6 +1157,69 @@ class FrameMotionTextDiT(nn.Module):
         hidden = self.control_kv_down[layer_idx](control_tokens)
         return self.control_kv_up_k[layer_idx](hidden), self.control_kv_up_v[layer_idx](hidden)
 
+    def _inject_local_text(
+        self,
+        motion: torch.Tensor,
+        motion_valid: torch.Tensor,
+        local_text: Optional[torch.Tensor],
+        local_text_padding_mask: Optional[torch.Tensor],
+        block_index: int,
+    ) -> torch.Tensor:
+        if not self.local_text_cross_attention:
+            if local_text is not None or local_text_padding_mask is not None:
+                raise ValueError(
+                    "Local text memory was provided to a backbone without "
+                    "local_text_cross_attention"
+                )
+            return motion
+        if local_text is None or local_text_padding_mask is None:
+            raise ValueError(
+                "Local text cross-attention requires tokens and a padding mask"
+            )
+        if (
+            local_text.ndim != 3
+            or local_text.shape[0] != motion.shape[0]
+            or local_text.shape[2] != motion.shape[2]
+        ):
+            raise ValueError(
+                "local_text must have shape [B,L,H] matching motion hidden size"
+            )
+        if local_text_padding_mask.shape != local_text.shape[:2]:
+            raise ValueError(
+                "local_text_padding_mask must have shape [B,L]"
+            )
+        local_valid = ~local_text_padding_mask.to(
+            device=motion.device,
+            dtype=torch.bool,
+        )
+        text_present = local_valid.any(dim=1)
+        safe_valid = local_valid.clone()
+        safe_memory = local_text
+        missing = ~text_present
+        if bool(missing.any()):
+            safe_valid[missing, 0] = True
+            safe_memory = local_text.clone()
+            safe_memory[missing, 0] = 0.0
+        block = self.double_blocks[int(block_index)]
+        attention = (
+            block.joint_attn
+            if block.joint_attn is not None
+            else block.motion_attn
+        )
+        if attention is None:
+            raise RuntimeError("Double-stream block has no motion attention")
+        update = attention(
+            self.local_text_query_norms[int(block_index)](motion),
+            safe_memory,
+            key_valid=safe_valid,
+            query_valid=motion_valid,
+        )
+        update = update * text_present[:, None, None].to(update.dtype)
+        gate = torch.tanh(self.local_text_gates[int(block_index)]).to(
+            dtype=motion.dtype
+        )
+        return motion + gate * update
+
     def forward(
         self,
         motion: torch.Tensor,
@@ -1143,11 +1229,13 @@ class FrameMotionTextDiT(nn.Module):
         text_padding_mask: torch.Tensor,
         motion_pos_ids: torch.Tensor,
         control_cond: Optional[torch.Tensor] = None,
+        local_text: Optional[torch.Tensor] = None,
+        local_text_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         text_valid = ~text_padding_mask
         control_tokens = self._encode_control(control_cond, motion, motion_valid)
         layer_idx = 0
-        for block in self.double_blocks:
+        for double_index, block in enumerate(self.double_blocks):
             control_k = control_v = control_bias = None
             if control_tokens is not None:
                 control_k, control_v = self._control_kv(control_tokens, layer_idx)
@@ -1165,6 +1253,13 @@ class FrameMotionTextDiT(nn.Module):
                 control_valid=motion_valid,
                 control_pos=motion_pos_ids,
                 control_attn_bias=control_bias,
+            )
+            motion = self._inject_local_text(
+                motion,
+                motion_valid,
+                local_text,
+                local_text_padding_mask,
+                double_index,
             )
             layer_idx += 1
 

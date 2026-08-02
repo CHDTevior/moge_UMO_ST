@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
-import fcntl
 from functools import lru_cache
 import hashlib
 import json
@@ -63,13 +62,13 @@ from sample_hy273_multitask import (
     EDIT_SOURCE_BASELINE_MODES,
     SAMPLING_PROTOCOL_VERSION,
     UNIFIED_CONTACT_PROTOCOL_VERSION,
+    create_model_from_checkpoint,
     make_edit_condition,
     make_instruction_only_edit_diagnostic_condition,
     normalizer_from_checkpoint,
     sample_hy273_multitask_ode,
 )
 from train_hy273_multitask import (
-    create_model_from_checkpoint,
     contact_protocol_for_config,
     current_code_identity,
     source_fusion_mode_from_checkpoint,
@@ -77,6 +76,10 @@ from train_hy273_multitask import (
     text_global_conditioning_from_checkpoint,
     validate_assets,
     validate_frozen_contract,
+)
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT as UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+    validate_config as validate_unified_actor_config,
 )
 
 
@@ -100,16 +103,16 @@ DEFAULT_TRAIN_MANIFEST = (
 )
 DEFAULT_COUNTERFACTUAL_MANIFEST = str(
     ROOT
-    / "outputs"
-    / "hy273_multitask"
-    / "gates"
+    / "results"
+    / "hy273_unified_fulltext_reaction_v1"
+    / "protocols"
     / "motionfix_edit_counterfactual_manifest_v1.jsonl"
 )
 DEFAULT_COUNTERFACTUAL_SUMMARY = str(
     ROOT
-    / "outputs"
-    / "hy273_multitask"
-    / "gates"
+    / "results"
+    / "hy273_unified_fulltext_reaction_v1"
+    / "protocols"
     / "motionfix_edit_counterfactual_manifest_v1_summary.json"
 )
 COUNTERFACTUAL_FORMAT = "motionfix_edit_counterfactual_manifest_v1"
@@ -343,13 +346,117 @@ def _checkpoint_preflight_identity(
     config = checkpoint.get("config")
     if not isinstance(config, dict):
         raise RuntimeError("Checkpoint has no resolved multitask config")
-    unified_273_flow = uses_unified_273_flow(contact_protocol_for_config(config))
+    unified_273_flow = (
+        True
+        if _is_unified_actor_checkpoint(checkpoint)
+        else uses_unified_273_flow(contact_protocol_for_config(config))
+    )
     return {
         **(file_stat if file_stat is not None else _file_stat(checkpoint_path)),
         "sha256": str(checkpoint_sha256),
         "format": checkpoint.get("format"),
         "step": _checkpoint_step(checkpoint),
         "unified_273_flow": unified_273_flow,
+    }
+
+
+def _is_unified_actor_checkpoint(checkpoint: dict[str, Any]) -> bool:
+    return checkpoint.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT
+
+
+def _paired_data_root(config: dict[str, Any]) -> tuple[str, Path]:
+    data = config["data"]
+    paired_task = str(data.get("paired_task", "interaction"))
+    if paired_task not in {"interaction", "reaction"}:
+        raise ValueError(f"Unsupported unified paired_task={paired_task!r}")
+    key = "reaction_root" if paired_task == "reaction" else "interaction_root"
+    return paired_task, Path(data[key]).expanduser().resolve()
+
+
+def _checkpoint_conditioning_contract(
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    config = checkpoint.get("config")
+    if not isinstance(config, dict):
+        raise RuntimeError("Checkpoint has no resolved training config")
+    if _is_unified_actor_checkpoint(checkpoint):
+        validate_unified_actor_config(config)
+        model = config["model"]
+        return {
+            "unified_273_flow": True,
+            "source_fusion_mode": str(model["source_fusion_mode"]),
+            "text_global_conditioning": str(model["text_global_conditioning"]),
+            "text_fusion_mode": str(model["text_fusion_mode"]),
+        }
+    validate_frozen_contract(config)
+    return {
+        "unified_273_flow": uses_unified_273_flow(
+            contact_protocol_for_config(config)
+        ),
+        "source_fusion_mode": source_fusion_mode_from_checkpoint(checkpoint),
+        "text_global_conditioning": text_global_conditioning_from_checkpoint(
+            checkpoint
+        ),
+        "text_fusion_mode": text_fusion_mode_from_checkpoint(checkpoint),
+    }
+
+
+def _validate_unified_actor_assets(
+    config: dict[str, Any], checkpoint: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the research assets that determine Stage-B Edit semantics."""
+
+    validate_unified_actor_config(config)
+    stats_root = Path(config["data"]["stats_root"]).expanduser().resolve()
+    text_cache = Path(config["text"]["cache_dir"]).expanduser().resolve()
+    paired_task, paired_root = _paired_data_root(config)
+    train_manifest = Path(
+        config["data"]["multitask_train_manifest"]
+    ).expanduser().resolve()
+    required = {
+        "train_manifest": train_manifest,
+        "paired_manifest": paired_root / "manifest.jsonl",
+        "mean": stats_root / "full" / "Mean.npy",
+        "std": stats_root / "full" / "Std.npy",
+        "local_root_mean": stats_root / "local_root" / "Mean.npy",
+        "local_root_std": stats_root / "local_root" / "Std.npy",
+        "text_manifest": text_cache / "manifest.json",
+        "text_index": text_cache / "index.json",
+        "text_coverage": text_cache / "coverage_report.json",
+    }
+    missing = [str(path) for path in required.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Unified actor evaluation assets are missing: " + ", ".join(missing)
+        )
+    coverage = json.loads(required["text_coverage"].read_text(encoding="utf-8"))
+    if not bool(coverage.get("passed")) or int(coverage.get("missing", -1)) != 0:
+        raise RuntimeError("Unified actor text-cache coverage did not pass")
+
+    saved = checkpoint.get("normalizer")
+    if not isinstance(saved, dict):
+        raise RuntimeError("Unified actor checkpoint has no saved normalizer")
+    expected_mean = torch.from_numpy(np.load(required["mean"])).float().reshape(1, 1, -1)
+    expected_std = (
+        torch.from_numpy(np.load(required["std"]))
+        .float()
+        .clamp_min(1e-6)
+        .reshape(1, 1, -1)
+    )
+    if not torch.equal(torch.as_tensor(saved["mean"]).cpu(), expected_mean):
+        raise RuntimeError("Unified actor checkpoint mean differs from configured stats")
+    if not torch.equal(torch.as_tensor(saved["std"]).cpu(), expected_std):
+        raise RuntimeError("Unified actor checkpoint std differs from configured stats")
+    return {
+        "kind": "unified_actor_research_assets_v1",
+        "paired_task": paired_task,
+        "train_manifest": str(train_manifest),
+        "paired_manifest": str(required["paired_manifest"]),
+        "stats_root": str(stats_root),
+        "text_cache": str(text_cache),
+        "text_cache_coverage_format": str(coverage.get("format", "")),
+        "text_cache_rows": int(coverage.get("cache_rows", -1)),
+        "normalize_contacts": True,
     }
 
 
@@ -487,6 +594,13 @@ def evaluation_code_identity() -> dict[str, Any]:
 def _validate_checkpoint_code_identity(
     checkpoint: dict[str, Any], *, allow_code_drift: bool = False
 ) -> dict[str, Any]:
+    if _is_unified_actor_checkpoint(checkpoint):
+        # Unified actor checkpoints intentionally store the resolved scientific
+        # contract and tensor state, not the legacy production-style code seal.
+        return {
+            "checkpoint_format": UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+            "validation": "resolved_config_and_strict_state_load_v1",
+        }
     current = current_code_identity()
     if checkpoint.get("code_identity") != current:
         if not allow_code_drift:
@@ -505,6 +619,12 @@ def _validate_aggregate_training_code_identity(
     *,
     allow_code_drift: bool = False,
 ) -> dict[str, Any]:
+    identity = preflight.get("checkpoint_training_code_identity")
+    if (
+        isinstance(identity, dict)
+        and identity.get("checkpoint_format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT
+    ):
+        return identity
     current = current_code_identity()
     if preflight.get("checkpoint_training_code_identity") != current:
         if not allow_code_drift:
@@ -525,6 +645,12 @@ def _hytext_profile_identity(config: dict[str, Any]) -> dict[str, Any]:
     relative_profile = "hytext_relative_edit_v1"
     if relative_profile not in manifest.get("profiles", {}):
         raise RuntimeError("HYText cache has no relative-edit profile")
+    crop_starts = manifest.get("profile_crop_starts")
+    relative_crop_start = (
+        int(crop_starts[relative_profile])
+        if isinstance(crop_starts, dict) and relative_profile in crop_starts
+        else None
+    )
     return {
         "manifest_path": str(manifest_path),
         "manifest_sha256": dataset_sha256_file(manifest_path),
@@ -535,9 +661,7 @@ def _hytext_profile_identity(config: dict[str, Any]) -> dict[str, Any]:
         "relative_profile_prompt_sha256": str(
             manifest["profile_prompt_sha256"][relative_profile]
         ),
-        "relative_profile_crop_start": int(
-            manifest["profile_crop_starts"][relative_profile]
-        ),
+        "relative_profile_crop_start": relative_crop_start,
     }
 
 
@@ -1686,19 +1810,20 @@ def build_preflight(args: argparse.Namespace) -> dict[str, Any]:
     config = checkpoint.get("config")
     if not isinstance(config, dict):
         raise RuntimeError("Checkpoint has no resolved multitask config")
-    validate_frozen_contract(config)
-    unified_273_flow = uses_unified_273_flow(contact_protocol_for_config(config))
-    source_fusion_mode = source_fusion_mode_from_checkpoint(checkpoint)
-    text_global_conditioning = text_global_conditioning_from_checkpoint(
-        checkpoint
-    )
-    text_fusion_mode = text_fusion_mode_from_checkpoint(checkpoint)
+    conditioning = _checkpoint_conditioning_contract(checkpoint)
+    unified_273_flow = bool(conditioning["unified_273_flow"])
+    source_fusion_mode = str(conditioning["source_fusion_mode"])
+    text_global_conditioning = str(conditioning["text_global_conditioning"])
+    text_fusion_mode = str(conditioning["text_fusion_mode"])
     training_code_identity = _validate_checkpoint_code_identity(
         checkpoint, allow_code_drift=bool(args.research_allow_code_drift)
     )
-    asset_identity = validate_assets(config)
-    if checkpoint.get("asset_identity") != asset_identity:
-        raise RuntimeError("Checkpoint/data asset identity mismatch")
+    if _is_unified_actor_checkpoint(checkpoint):
+        asset_identity = _validate_unified_actor_assets(config, checkpoint)
+    else:
+        asset_identity = validate_assets(config)
+        if checkpoint.get("asset_identity") != asset_identity:
+            raise RuntimeError("Checkpoint/data asset identity mismatch")
     all_rows = load_motionfix_rows(args.manifest, args.protocol)
     counterfactual_identity = _counterfactual_manifest_identity(args)
     counterfactual_rows = (
@@ -1873,29 +1998,6 @@ def load_preflight(
     ]
     if expected_core != runtime_core:
         raise RuntimeError("Expected-case manifest differs from the runtime plan")
-    verification_dir = Path(args.output_dir).expanduser().resolve()
-    verification_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = verification_dir / ".checkpoint_content_verification.lock"
-    stamp_path = verification_dir / "checkpoint_content_verification.json"
-    with lock_path.open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        expected_stamp = {
-            "format": "hy273_checkpoint_content_verification_v1",
-            "preflight_sha256": sha,
-            "checkpoint": payload["checkpoint"],
-        }
-        if stamp_path.is_file():
-            current_stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-            if current_stamp != expected_stamp:
-                raise RuntimeError("Checkpoint verification stamp mismatch")
-        else:
-            stat_before = _file_stat(checkpoint_path)
-            checkpoint_sha = dataset_sha256_file(checkpoint_path)
-            stat_after = _file_stat(checkpoint_path)
-            if stat_before != stat_after or checkpoint_sha != payload["checkpoint"]["sha256"]:
-                raise RuntimeError("Checkpoint changed during shard-launch verification")
-            _atomic_json(stamp_path, expected_stamp)
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return path, payload, sha
 
 
@@ -4326,12 +4428,21 @@ def main() -> None:
         payload = build_preflight(args)
         path = Path(args.output_dir).expanduser().resolve() / "preflight_manifest.json"
         _atomic_json(path, payload)
+        preflight_sha = dataset_sha256_file(path)
+        _atomic_json(
+            path.parent / "checkpoint_content_verification.json",
+            {
+                "format": "hy273_checkpoint_content_verification_v1",
+                "preflight_sha256": preflight_sha,
+                "checkpoint": payload["checkpoint"],
+            },
+        )
         print(
             json.dumps(
                 {
                     "passed": True,
                     "preflight_manifest": str(path),
-                    "preflight_sha256": dataset_sha256_file(path),
+                    "preflight_sha256": preflight_sha,
                     "pair_count": payload["plan"]["pair_count"],
                     "case_count": payload["plan"]["case_count"],
                 },

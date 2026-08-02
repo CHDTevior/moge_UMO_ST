@@ -48,6 +48,8 @@ def _edit_condition(batch: int = 2, source_frames: int = 7, target_frames: int =
         frame_policy_id=torch.full(
             (batch,), int(FramePolicy.INDEPENDENT_SEQUENCE), dtype=torch.long
         ),
+        ease_physical=torch.zeros(batch, 6),
+        ease_present=torch.zeros(batch, dtype=torch.bool),
     )
 
 
@@ -131,6 +133,14 @@ def test_edit_contract_and_device_transfer():
                 frame_gauge_dir=torch.zeros_like(c.frame_gauge_dir),
             ),
             "unit",
+        ),
+        (
+            lambda c: replace(
+                c,
+                ease_physical=torch.ones(c.batch_size, 6),
+                ease_present=torch.ones(c.batch_size, dtype=torch.bool),
+            ),
+            "cannot carry Ease",
         ),
     ],
 )

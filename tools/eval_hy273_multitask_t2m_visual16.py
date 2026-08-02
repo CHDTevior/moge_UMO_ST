@@ -24,12 +24,19 @@ from models.raw_motion.hy273_slices import (
     fk_positions_from_global_rot6d,
     reconstruct_global_joints_from_features,
 )
-from sample_hy273_multitask import normalizer_from_checkpoint, sample_hy273_multitask_ode
+from sample_hy273_multitask import (
+    create_model_from_checkpoint,
+    normalizer_from_checkpoint,
+    sample_hy273_multitask_ode,
+)
 from train_hy273_multitask import (
     FROZEN_STAGE_CONTRACTS,
-    create_model_from_checkpoint,
     sha256_file,
     validate_frozen_contract,
+)
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT as UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+    validate_config as validate_unified_actor_config,
 )
 
 
@@ -55,9 +62,12 @@ PROMPTS = (
 LENGTHS = (300, 94, 97, 201, 124, 171, 225, 300, 300, 138, 153, 262, 300, 60, 217, 288)
 
 
-def _validate_checkpoint_config(config: dict) -> str:
+def _validate_checkpoint_config(config: dict, checkpoint_format: object) -> str:
     """Validate old R12 checkpoints after schedule_version became explicit."""
 
+    if checkpoint_format == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+        validate_unified_actor_config(config)
+        return "unified_actor_v1"
     try:
         validate_frozen_contract(config)
         return "exact"
@@ -125,7 +135,9 @@ def main() -> None:
     config = checkpoint.get("config")
     if not isinstance(config, dict):
         raise RuntimeError("Checkpoint has no resolved multitask config")
-    config_compatibility = _validate_checkpoint_config(config)
+    config_compatibility = _validate_checkpoint_config(
+        config, checkpoint.get("format")
+    )
     checkpoint_step = int(checkpoint.get("next_global_step", -1))
     if checkpoint_step < 0:
         raise RuntimeError("Checkpoint has no valid next_global_step")
@@ -156,7 +168,7 @@ def main() -> None:
         text_cfg_scale=float(args.cfg_scale),
         contact_init="random",
         contact_feedback="blend",
-        cfg_apply_contacts=False,
+        cfg_apply_contacts=None if normalizer.normalize_contacts else False,
         generator=generator,
     )
     samples = sampled.raw_motion.cpu().float()

@@ -46,6 +46,7 @@ from models.raw_motion.hy273_t2m_eval import (
     hy273_to_motionstreamer272,
 )
 from sample_hy273_multitask import (
+    create_model_from_checkpoint as create_multitask_model_from_checkpoint,
     normalizer_from_checkpoint as multitask_normalizer_from_checkpoint,
     sample_hy273_multitask_ode,
 )
@@ -56,12 +57,15 @@ from sample_hy273_raw import (
 )
 from train_hy273_multitask import (
     CHECKPOINT_FORMAT as MULTITASK_CHECKPOINT_FORMAT,
-    create_model_from_checkpoint as create_multitask_model_from_checkpoint,
     contact_protocol_for_config,
     validate_assets as validate_multitask_assets,
     validate_frozen_contract,
 )
 from train_hy273_raw_flow import create_model as create_archived_model
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT as UNIFIED_ACTOR_CHECKPOINT_FORMAT,
+    validate_config as validate_unified_actor_config,
+)
 
 
 PREFLIGHT_FORMAT = "hy273_t2m_nonregression_preflight_v2"
@@ -321,6 +325,8 @@ def load_plan(
 
 
 def checkpoint_kind(checkpoint: dict[str, Any]) -> str:
+    if checkpoint.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT:
+        return "unified_actor"
     if checkpoint.get("format") == MULTITASK_CHECKPOINT_FORMAT:
         return "multitask"
     train_args = checkpoint.get("args")
@@ -331,6 +337,54 @@ def checkpoint_kind(checkpoint: dict[str, Any]) -> str:
     ):
         return "archived_kimodo_like"
     raise RuntimeError("Unsupported HY273 checkpoint format")
+
+
+def _unified_actor_asset_contract(
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    config = checkpoint.get("config")
+    if not isinstance(config, dict):
+        raise RuntimeError("Unified actor checkpoint has no resolved config")
+    validate_unified_actor_config(config)
+    stats_root = Path(config["data"]["stats_root"]).expanduser().resolve()
+    text_cache = Path(config["text"]["cache_dir"]).expanduser().resolve()
+    required = {
+        "mean": stats_root / "full" / "Mean.npy",
+        "std": stats_root / "full" / "Std.npy",
+        "text_manifest": text_cache / "manifest.json",
+        "text_index": text_cache / "index.json",
+        "text_coverage": text_cache / "coverage_report.json",
+    }
+    missing = [str(path) for path in required.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Unified actor evaluation assets are missing: " + ", ".join(missing)
+        )
+    coverage = json.loads(required["text_coverage"].read_text(encoding="utf-8"))
+    if not bool(coverage.get("passed")) or int(coverage.get("missing", -1)) != 0:
+        raise RuntimeError("Unified actor text-cache coverage did not pass")
+    saved = checkpoint.get("normalizer")
+    if not isinstance(saved, dict):
+        raise RuntimeError("Unified actor checkpoint has no saved normalizer")
+    mean = torch.from_numpy(np.load(required["mean"])).float().reshape(1, 1, -1)
+    std = (
+        torch.from_numpy(np.load(required["std"]))
+        .float()
+        .clamp_min(1e-6)
+        .reshape(1, 1, -1)
+    )
+    if not torch.equal(torch.as_tensor(saved["mean"]).cpu(), mean):
+        raise RuntimeError("Unified actor checkpoint mean differs from configured stats")
+    if not torch.equal(torch.as_tensor(saved["std"]).cpu(), std):
+        raise RuntimeError("Unified actor checkpoint std differs from configured stats")
+    return {
+        "kind": "unified_actor_research_assets_v1",
+        "stats_root": str(stats_root),
+        "text_cache": str(text_cache),
+        "text_cache_coverage_format": str(coverage.get("format", "")),
+        "text_cache_rows": int(coverage.get("cache_rows", -1)),
+        "normalize_contacts": True,
+    }
 
 
 def _sampling_identity(
@@ -448,7 +502,7 @@ def build_preflight(args: argparse.Namespace) -> dict[str, Any]:
             "sha256": sha256_file(attestation_path),
             "reused": bool(reused),
         }
-    else:
+    elif kind == "multitask":
         config = checkpoint.get("config")
         if not isinstance(config, dict):
             raise RuntimeError("Multitask checkpoint has no resolved config")
@@ -459,6 +513,9 @@ def build_preflight(args: argparse.Namespace) -> dict[str, Any]:
         asset_identity = validate_multitask_assets(config)
         if checkpoint.get("asset_identity") != asset_identity:
             raise RuntimeError("Multitask checkpoint asset identity mismatch")
+    else:
+        asset_identity = _unified_actor_asset_contract(checkpoint)
+        unified_273_flow = True
 
     plan = load_plan(
         args.manifest,
@@ -625,7 +682,7 @@ def _load_runtime(
             "self_conditioning": bool(train_args.self_conditioning),
             "unified_273_flow": False,
         }
-    else:
+    elif kind == "multitask":
         config = checkpoint["config"]
         current_asset_identity = validate_multitask_assets(config)
         if (
@@ -633,6 +690,21 @@ def _load_runtime(
             or current_asset_identity != preflight.get("asset_identity")
         ):
             raise RuntimeError("Multitask asset identity changed after T2M preflight")
+        model = create_multitask_model_from_checkpoint(checkpoint).to(device)
+        state = checkpoint[args.weight_source]
+        model.load_state_dict(state, strict=True)
+        normalizer = multitask_normalizer_from_checkpoint(checkpoint, device)
+        runtime = {
+            "weight_source": args.weight_source,
+            "prediction_type": "x0",
+            "unified_273_flow": bool(normalizer.normalize_contacts),
+        }
+    else:
+        current_asset_identity = _unified_actor_asset_contract(checkpoint)
+        if current_asset_identity != preflight.get("asset_identity"):
+            raise RuntimeError(
+                "Unified actor scientific asset contract changed after T2M preflight"
+            )
         model = create_multitask_model_from_checkpoint(checkpoint).to(device)
         state = checkpoint[args.weight_source]
         model.load_state_dict(state, strict=True)

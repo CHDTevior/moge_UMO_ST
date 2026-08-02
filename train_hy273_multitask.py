@@ -28,9 +28,12 @@ from models.codeflow.dit_blocks import TEXT_FUSION_MODES
 from data.hy273_multitask_batcher import HY273MultitaskStepBatcher
 from data.hy273_multitask_scheduler import (
     BUCKET_PLAN_VERSION,
+    DECOMPOSED_CFG_EDIT_SCHEDULE_VERSIONS,
     EditConditionPattern,
     HIGH_LEVEL_SCHEDULE_VERSION,
     HML_INNER_SCHEDULE_VERSION,
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
     R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
     SAMPLE_RNG_VERSION,
     STAGE_C_EDIT20_SCHEDULE_VERSION,
@@ -60,6 +63,7 @@ from models.raw_motion.hy273_constraints import (
     KimodoControlCurriculum,
     build_kimodo_control_curriculum_batch,
 )
+from models.raw_motion.hy273_ease import EASE_DIM, EASE_STATS_FORMAT
 from models.raw_motion.hy273_multitask_condition import (
     CapabilityId,
     ConditionBatch,
@@ -155,6 +159,10 @@ OPTIMIZER_GROUP_ORDER = (
     "G0_existing",
     "G1_context_weight",
     "G2_context_bias",
+)
+EASE_OPTIMIZER_GROUP_ORDER = (
+    "G3_ease_weight",
+    "G4_ease_bias",
 )
 CONDITIONING_ARCHITECTURES = (
     "hytext_flux",
@@ -692,6 +700,18 @@ FROZEN_STAGE_CONTRACTS = {
         int(TrainingPhase.STAGE_B1),
         R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
     ),
+    "stage_be_kencoder_edit": (
+        200_000,
+        250_000,
+        int(TrainingPhase.STAGE_B1),
+        KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    ),
+    "stage_bc_kencoder_ease_control": (
+        250_000,
+        400_000,
+        int(TrainingPhase.STAGE_B2),
+        KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    ),
     "stage_c_consolidate": (
         400_000,
         500_000,
@@ -860,7 +880,7 @@ def base_contract_sha(config: dict[str, Any]) -> str:
     payload = {
         key: value
         for key, value in config.items()
-        if key not in {"stage", "edit_objective"}
+        if key not in {"stage", "edit_objective", "ease"}
     }
     payload = json.loads(json.dumps(payload))
     payload["training"].pop("output_dir", None)
@@ -1336,8 +1356,14 @@ def validate_frozen_contract(config: dict[str, Any]) -> HY273MultitaskLossWeight
             expected_values["training.max_global_step"] = 550_000
         contract_label = "R12 root-mask"
     elif contract_name == "hy273_multitask_r13_unified273_v1":
-        expected_sections = R13_FROZEN_CONFIG_SECTION_FIELDS
-        expected_values = R13_FROZEN_CONFIG_VALUES
+        expected_sections = {
+            section: set(fields)
+            for section, fields in R13_FROZEN_CONFIG_SECTION_FIELDS.items()
+        }
+        expected_values = dict(R13_FROZEN_CONFIG_VALUES)
+        if stage_name == "stage_bc_kencoder_ease_control":
+            expected_sections["ease"] = {"enabled", "stats_dir"}
+            expected_values["ease.enabled"] = True
         contract_label = "R13 unified-273"
     else:
         raise ValueError(f"Unknown HY273 multitask contract: {contract_name!r}")
@@ -1576,6 +1602,98 @@ def validate_assets(
     return identity
 
 
+def validate_ease_stats(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Bind Ease normalization to its scientific data semantics."""
+
+    ease = config.get("ease")
+    if not isinstance(ease, dict) or not bool(ease.get("enabled", False)):
+        return None
+    root = Path(str(ease.get("stats_dir", ""))).expanduser().resolve()
+    mean_path = root / "Mean.npy"
+    std_path = root / "Std.npy"
+    metadata_path = root / "metadata.json"
+    missing = [
+        str(path)
+        for path in (mean_path, std_path, metadata_path)
+        if not path.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"Required Ease stats assets are missing: {missing}")
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("format") != EASE_STATS_FORMAT:
+        raise ValueError("Ease stats format mismatch")
+    if int(metadata.get("feature_dim", -1)) != EASE_DIM:
+        raise ValueError("Ease stats feature_dim mismatch")
+    source_manifest = Path(
+        str(metadata.get("source_manifest", ""))
+    ).expanduser().resolve()
+    train_manifest = Path(cfg_get(config, "data.train_manifest")).expanduser().resolve()
+    if source_manifest != train_manifest:
+        raise RuntimeError(
+            "Ease stats were not built from the configured train manifest"
+        )
+    if metadata.get("split") != "train":
+        raise RuntimeError("Ease stats must be computed from the train split")
+    if metadata.get("dataset") != "humanml3d_k273":
+        raise RuntimeError("Ease stats must use the HumanML3D K273 target distribution")
+    for field in ("row_count", "caption_occurrences", "unique_target_assets"):
+        if int(metadata.get(field, 0)) <= 0:
+            raise RuntimeError(f"Ease stats metadata has invalid {field}")
+
+    mean = np.asarray(np.load(mean_path), dtype=np.float32)
+    std = np.asarray(np.load(std_path), dtype=np.float32)
+    if mean.shape != (EASE_DIM,) or std.shape != (EASE_DIM,):
+        raise ValueError("Ease Mean/Std must each have shape [6]")
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or not (std > 0).all():
+        raise ValueError("Ease Mean/Std must be finite with positive Std")
+
+    return {
+        "format": str(metadata["format"]),
+        "feature_dim": EASE_DIM,
+        "dataset": str(metadata["dataset"]),
+        "split": str(metadata["split"]),
+        "source_manifest": str(source_manifest),
+        "row_count": int(metadata["row_count"]),
+        "caption_occurrences": int(metadata["caption_occurrences"]),
+        "unique_target_assets": int(metadata["unique_target_assets"]),
+        "physical_label": str(metadata.get("physical_label", "")),
+        "weighting": str(metadata.get("weighting", "")),
+        "yaw_statistics": str(metadata.get("yaw_statistics", "")),
+        "mean": mean.tolist(),
+        "std": std.tolist(),
+    }
+
+
+def assert_model_ease_stats(
+    model: HY273KimodoContextFlow,
+    identity: dict[str, Any] | None,
+) -> None:
+    conditioner = model.ease_conditioner
+    if identity is None:
+        if conditioner is not None:
+            raise RuntimeError("Ease-disabled run unexpectedly constructed an Ease conditioner")
+        return
+    if conditioner is None:
+        raise RuntimeError("Ease-enabled run has no Ease conditioner")
+    expected_mean = torch.tensor(
+        identity["mean"],
+        device=conditioner.normalizer.mean.device,
+        dtype=conditioner.normalizer.mean.dtype,
+    )
+    expected_std = torch.tensor(
+        identity["std"],
+        device=conditioner.normalizer.std.device,
+        dtype=conditioner.normalizer.std.dtype,
+    )
+    if not torch.equal(conditioner.normalizer.mean, expected_mean) or not torch.equal(
+        conditioner.normalizer.std, expected_std
+    ):
+        raise RuntimeError(
+            "Model Ease normalization buffers differ from the configured Ease stats"
+        )
+
+
 def create_model(
     config: dict[str, Any],
     *,
@@ -1615,6 +1733,11 @@ def create_model(
         )
     stats_root = Path(cfg_get(config, "data.stats_root"))
     normalize_contacts = uses_unified_273_flow(contact_protocol_for_config(config))
+    ease_config = config.get("ease", {})
+    use_ease = bool(ease_config.get("enabled", False))
+    ease_stats_dir = str(ease_config.get("stats_dir", ""))
+    if use_ease and not ease_stats_dir:
+        raise ValueError("Ease-enabled model requires ease.stats_dir")
     return HY273KimodoContextFlow(
         hidden_dim=int(cfg_get(config, "model.hidden_dim")),
         num_heads=int(cfg_get(config, "model.num_heads")),
@@ -1643,6 +1766,8 @@ def create_model(
         text_global_conditioning=text_global_conditioning,
         text_fusion_mode=text_fusion_mode,
         backbone_type=backbone_type,
+        use_ease=use_ease,
+        ease_stats_dir=ease_stats_dir,
     )
 
 
@@ -1845,11 +1970,25 @@ def optimizer_groups(
         "G1_context_weight": model.context_weight_parameters(),
         "G2_context_bias": model.context_bias_parameters(),
     }
+    group_order = OPTIMIZER_GROUP_ORDER
+    if model.use_ease:
+        group_parameters.update(
+            {
+                "G3_ease_weight": model.ease_weight_parameters(),
+                "G4_ease_bias": model.ease_bias_parameters(),
+            }
+        )
+        group_order = (*OPTIMIZER_GROUP_ORDER, *EASE_OPTIMIZER_GROUP_ORDER)
     seen: set[int] = set()
     groups: list[dict[str, Any]] = []
-    manifest: dict[str, Any] = {"order": list(OPTIMIZER_GROUP_ORDER), "groups": {}}
+    manifest: dict[str, Any] = {"order": list(group_order), "groups": {}}
     hparams = optimizer_group_hparams(step, schedule_version)
-    for group_name in OPTIMIZER_GROUP_ORDER:
+    if set(hparams) != set(group_order):
+        raise RuntimeError(
+            f"Optimizer hparameter groups differ from model groups: "
+            f"hparams={sorted(hparams)} model={list(group_order)}"
+        )
+    for group_name in group_order:
         params = tuple(group_parameters[group_name])
         names = [by_id[id(param)] for param in params]
         if not params or len(set(map(id, params))) != len(params):
@@ -1893,7 +2032,7 @@ def apply_optimizer_phase(
 ) -> None:
     expected = optimizer_group_hparams(step, schedule_version)
     actual_names = tuple(str(group.get("group_name")) for group in optimizer.param_groups)
-    if actual_names != OPTIMIZER_GROUP_ORDER:
+    if actual_names != tuple(expected):
         raise RuntimeError(f"Optimizer group order changed: {actual_names}")
     for group in optimizer.param_groups:
         group_name = str(group["group_name"])
@@ -1909,6 +2048,119 @@ def apply_optimizer_phase(
             values["lr"] = float(g0_lr_override)
         if group["lr"] != values["lr"] or group["weight_decay"] != values["weight_decay"]:
             raise RuntimeError("Optimizer phase hparameters failed to resolve exactly")
+
+
+def _optimizer_parameter_ids_by_name(
+    optimizer_state: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, int]:
+    order = tuple(manifest.get("order", ()))
+    saved_groups = optimizer_state.get("param_groups")
+    manifest_groups = manifest.get("groups")
+    if not isinstance(saved_groups, list) or not isinstance(manifest_groups, dict):
+        raise ValueError("Optimizer checkpoint/manifest is malformed")
+    if len(saved_groups) != len(order):
+        raise ValueError("Optimizer group count differs from its manifest")
+    output: dict[str, int] = {}
+    for group_name, saved_group in zip(order, saved_groups):
+        if str(saved_group.get("group_name")) != str(group_name):
+            raise ValueError("Optimizer group order/name differs from its manifest")
+        record = manifest_groups.get(group_name)
+        names = record.get("parameter_names") if isinstance(record, dict) else None
+        parameter_ids = saved_group.get("params")
+        if not isinstance(names, list) or not isinstance(parameter_ids, list):
+            raise ValueError(f"Optimizer manifest group {group_name} is malformed")
+        if len(names) != len(parameter_ids):
+            raise ValueError(f"Optimizer group {group_name} tensor count mismatch")
+        for name, parameter_id in zip(names, parameter_ids):
+            if name in output:
+                raise ValueError(f"Duplicate optimizer parameter name {name}")
+            output[str(name)] = int(parameter_id)
+    return output
+
+
+def migrate_optimizer_state_with_new_ease(
+    optimizer: torch.optim.Optimizer,
+    *,
+    parent_state: dict[str, Any],
+    parent_manifest: dict[str, Any],
+    current_manifest: dict[str, Any],
+) -> None:
+    """Retain every parent Adam moment while leaving new Ease state empty."""
+
+    current_state = optimizer.state_dict()
+    parent_ids = _optimizer_parameter_ids_by_name(parent_state, parent_manifest)
+    current_ids = _optimizer_parameter_ids_by_name(current_state, current_manifest)
+    ease_names = {
+        name for name in current_ids if name.startswith("ease_conditioner.")
+    }
+    if not ease_names:
+        raise RuntimeError("Ease optimizer migration found no Ease parameters")
+    expected_parent_names = set(current_ids) - ease_names
+    if set(parent_ids) != expected_parent_names:
+        missing = sorted(expected_parent_names - set(parent_ids))
+        unexpected = sorted(set(parent_ids) - expected_parent_names)
+        raise RuntimeError(
+            "Parent/current non-Ease optimizer parameters differ: "
+            f"missing={missing[:8]} unexpected={unexpected[:8]}"
+        )
+    migrated_state: dict[int, Any] = {}
+    parent_slots = parent_state.get("state")
+    if not isinstance(parent_slots, dict):
+        raise ValueError("Parent optimizer state is malformed")
+    for name in expected_parent_names:
+        parent_id = parent_ids[name]
+        if parent_id in parent_slots:
+            migrated_state[current_ids[name]] = parent_slots[parent_id]
+    current_state["state"] = migrated_state
+    optimizer.load_state_dict(current_state)
+    if any(
+        parameter in optimizer.state
+        for group in optimizer.param_groups[-len(EASE_OPTIMIZER_GROUP_ORDER) :]
+        for parameter in group["params"]
+    ):
+        raise RuntimeError("New Ease parameters unexpectedly acquired Adam state")
+
+
+def load_parent_model_with_new_ease(
+    model: HY273KimodoContextFlow,
+    parent_state: dict[str, torch.Tensor],
+) -> tuple[str, ...]:
+    """Strictly load all parent tensors, allowing only new Ease tensors."""
+
+    incompatible = model.load_state_dict(parent_state, strict=False)
+    missing = tuple(sorted(incompatible.missing_keys))
+    unexpected = tuple(sorted(incompatible.unexpected_keys))
+    expected_missing = tuple(
+        sorted(
+            name
+            for name in model.state_dict()
+            if name.startswith("ease_conditioner.")
+        )
+    )
+    if unexpected or missing != expected_missing:
+        raise RuntimeError(
+            "Ease model migration mismatch: "
+            f"missing={missing} unexpected={unexpected}"
+        )
+    return missing
+
+
+def initialize_ema_with_new_ease(
+    model: HY273KimodoContextFlow,
+    parent_ema: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    ema = initialize_ema(model)
+    expected_parent = {
+        name for name in ema if not name.startswith("ease_conditioner.")
+    }
+    if set(parent_ema) != expected_parent:
+        raise RuntimeError("Parent EMA tensors differ outside the new Ease module")
+    for name, value in parent_ema.items():
+        if ema[name].shape != value.shape or ema[name].dtype != value.dtype:
+            raise RuntimeError(f"Parent EMA tensor schema changed at {name}")
+        ema[name] = value.to(device=ema[name].device)
+    return ema
 
 
 def _plan_draw(plan: Any, manifest_sha256: str, run_seed: int, stream_id: str) -> int:
@@ -2453,6 +2705,11 @@ def assert_and_mask_context_gradients(
         TrainingPhase.STAGE_C,
     }
     if (
+        schedule_version == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+        and phase == TrainingPhase.STAGE_B1
+    ):
+        context_phase_active = True
+    if (
         schedule_version == R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION
         and phase in {TrainingPhase.STAGE_B1, TrainingPhase.STAGE_B2}
     ):
@@ -2475,6 +2732,73 @@ def assert_and_mask_context_gradients(
         parameter.grad = None
         if not context_phase_active and parameter in optimizer.state:
             raise RuntimeError("Frozen context parameter acquired optimizer state")
+
+
+def assert_and_mask_ease_gradients(
+    model: HY273KimodoContextFlow,
+    *,
+    ease_active: bool,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    parameters = (*model.ease_weight_parameters(), *model.ease_bias_parameters())
+    if not parameters:
+        if ease_active:
+            raise RuntimeError("Ease-present batch reached an Ease-disabled model")
+        return
+    for parameter in parameters:
+        gradient = parameter.grad
+        if gradient is None:
+            raise RuntimeError("Ease parameter unexpectedly has grad=None after backward")
+        if not bool(torch.isfinite(gradient).all()):
+            raise RuntimeError("Ease gradient is non-finite")
+        if ease_active:
+            continue
+        if bool(torch.count_nonzero(gradient)):
+            raise RuntimeError("Ease-absent global batch produced a nonzero Ease gradient")
+        parameter.grad = None
+
+
+def _ease_optimizer_steps(
+    optimizer: torch.optim.Optimizer,
+    model: HY273KimodoContextFlow,
+) -> dict[int, int]:
+    output = {}
+    for parameter in (
+        *model.ease_weight_parameters(),
+        *model.ease_bias_parameters(),
+    ):
+        state = optimizer.state.get(parameter)
+        if not state or "step" not in state:
+            continue
+        value = state["step"]
+        output[id(parameter)] = (
+            int(value.item()) if torch.is_tensor(value) else int(value)
+        )
+    return output
+
+
+def _assert_ease_optimizer_count(
+    optimizer: torch.optim.Optimizer,
+    model: HY273KimodoContextFlow,
+    ease_update_count: int,
+) -> None:
+    parameters = (*model.ease_weight_parameters(), *model.ease_bias_parameters())
+    if not parameters:
+        if ease_update_count != 0:
+            raise RuntimeError("Ease-disabled checkpoint has a nonzero update count")
+        return
+    steps = _ease_optimizer_steps(optimizer, model)
+    if ease_update_count == 0:
+        if steps:
+            raise RuntimeError("Untrained Ease module has unexpected Adam state")
+        return
+    if len(steps) != len(parameters) or set(steps.values()) != {
+        int(ease_update_count)
+    }:
+        raise RuntimeError(
+            "Ease Adam step/count mismatch: "
+            f"states={sorted(steps.values())}, updates={ease_update_count}"
+        )
 
 
 def initialize_ema(model: HY273KimodoContextFlow) -> dict[str, torch.Tensor]:
@@ -2504,8 +2828,10 @@ def save_checkpoint(
     next_global_step: int,
     batcher: HY273MultitaskStepBatcher,
     context_update_count: int,
+    ease_update_count: int,
     optimizer_manifest: dict[str, Any],
     asset_identity: dict[str, Any],
+    ease_stats_identity: dict[str, Any] | None,
     normalizer: HY273Normalizer,
     run_name: str,
     run_uuid: str,
@@ -2536,11 +2862,13 @@ def save_checkpoint(
         "phase_id": int(phase_for_step(next_global_step)),
         "batcher": batcher.state_dict(),
         "context_update_count": int(context_update_count),
+        "ease_update_count": int(ease_update_count),
         "ema_update_count": int(ema_update_count),
         "code_identity": code_identity,
         "runtime_identity": runtime_identity,
         "optimizer_group_manifest": optimizer_manifest,
         "asset_identity": asset_identity,
+        "ease_stats_identity": ease_stats_identity,
         "normalizer": normalizer.state_dict(),
         "rng": {
             "python": random.getstate(),
@@ -2882,6 +3210,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--fork_kencoder_stage_be_edit",
+        action="store_true",
+        help=(
+            "Start the registered 200K K-Encoder Edit bootstrap as a new "
+            "research run while preserving the 4x32 global batch under 8x16."
+        ),
+    )
+    parser.add_argument(
+        "--fork_kencoder_stage_bc_ease_control",
+        action="store_true",
+        help=(
+            "Fork the completed 250K K-Encoder Edit model into the registered "
+            "10/70/20 T2M/control/Edit bootstrap with Ease conditioning."
+        ),
+    )
+    parser.add_argument(
         "--research_fork",
         action="store_true",
         help=(
@@ -2931,6 +3275,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--llm2vec_cache_dir",
         default="",
         help="Profile-aware offline LLM2Vec cache used by llm2vec treatments.",
+    )
+    parser.add_argument(
+        "--ease_stats_dir",
+        default="",
+        help="Optional research override for the configured Ease stats directory.",
     )
     parser.add_argument(
         "--base_representation_loss_space",
@@ -3004,6 +3353,12 @@ def main() -> None:
     ):
         raise ValueError("--g0_lr_override must be a finite positive value")
     config, config_path = load_config(args.config)
+    if args.ease_stats_dir:
+        if "ease" not in config:
+            raise ValueError("--ease_stats_dir requires an Ease-enabled stage config")
+        config["ease"]["stats_dir"] = str(
+            Path(args.ease_stats_dir).expanduser().resolve()
+        )
     loss_weights = validate_frozen_contract(config)
     current_train_contract = str(cfg_get(config, "contract.version"))
     uses_llm2vec = args.conditioning_architecture != "hytext_flux"
@@ -3045,7 +3400,21 @@ def main() -> None:
         == UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION
     )
     edit_loss_weights = unified_edit_loss_weights(config)
-    treatment = resolve_edit_research_treatment(args.research_treatment)
+    effective_treatment_name = args.research_treatment
+    if schedule_version in {
+        KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+        KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    }:
+        if (
+            effective_treatment_name
+            and effective_treatment_name != "no_rank_positive_only"
+        ):
+            raise ValueError(
+                "K-Encoder Stage-BE freezes the Edit treatment to "
+                "no_rank_positive_only"
+            )
+        effective_treatment_name = "no_rank_positive_only"
+    treatment = resolve_edit_research_treatment(effective_treatment_name)
     edit_representation_loss_space = str(treatment["representation_loss_space"])
     edit_contact_loss_space = str(treatment["contact_loss_space"])
     edit_representation_multiplier = float(treatment["representation_multiplier"])
@@ -3126,14 +3495,18 @@ def main() -> None:
         args.fork_stage_d_edit_calibration,
         args.fork_stage_c_unified_edit,
         args.fork_stage_c_unified_edit40,
+        args.fork_kencoder_stage_be_edit,
+        args.fork_kencoder_stage_bc_ease_control,
         args.research_fork,
     )
     if sum(bool(value) for value in fork_flags) > 1:
         raise ValueError("Stage/research fork modes are mutually exclusive")
-    has_research_treatment = bool(args.research_treatment)
-    if args.research_fork and not has_research_treatment:
+    has_explicit_research_treatment = bool(args.research_treatment)
+    has_effective_research_treatment = bool(effective_treatment_name)
+    collect_research_diagnostics = has_explicit_research_treatment
+    if args.research_fork and not has_explicit_research_treatment:
         raise ValueError("--research_fork requires one --research_treatment")
-    if has_research_treatment and not args.resume:
+    if has_explicit_research_treatment and not args.resume:
         raise ValueError("Edit research treatments require a parent or pilot checkpoint")
     if (schedule_version in UNIFIED_EDIT_SCHEDULE_VERSIONS) != (
         edit_loss_weights is not None
@@ -3147,6 +3520,44 @@ def main() -> None:
         raise ValueError("Invalid stage step interval")
     if expected_start > 0 and not args.resume:
         raise ValueError("Stages B1/B2/C require an exact previous-stage checkpoint")
+    if args.fork_kencoder_stage_be_edit:
+        if (
+            current_train_contract != R13_TRAIN_CONTRACT
+            or expected_start != 200_000
+            or stop_step != 250_000
+            or expected_phase != TrainingPhase.STAGE_B1
+            or schedule_version != KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+        ):
+            raise ValueError(
+                "K-Encoder Stage-BE fork requires its registered "
+                "200K->250K R13 config"
+            )
+        if not args.resume:
+            raise ValueError("K-Encoder Stage-BE fork requires the 200K checkpoint")
+        if not args.research_reshard_same_global_batch:
+            raise ValueError(
+                "The 4x32 Stage-A to 8x16 Stage-BE fork requires the "
+                "same-global-batch reshard"
+            )
+    if args.fork_kencoder_stage_bc_ease_control:
+        if (
+            current_train_contract != R13_TRAIN_CONTRACT
+            or expected_start != 250_000
+            or stop_step != 400_000
+            or expected_phase != TrainingPhase.STAGE_B2
+            or schedule_version
+            != KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+        ):
+            raise ValueError(
+                "K-Encoder Ease-Control fork requires its registered "
+                "250K->400K R13 config"
+            )
+        if not args.resume:
+            raise ValueError(
+                "K-Encoder Ease-Control fork requires the completed 250K checkpoint"
+            )
+        if not bool(config.get("ease", {}).get("enabled", False)):
+            raise ValueError("K-Encoder Ease-Control fork requires ease.enabled=true")
     if args.fork_from_r11_stage_a:
         if current_train_contract != R12_TRAIN_CONTRACT:
             raise ValueError("--fork_from_r11_stage_a requires the R12 root-mask contract")
@@ -3301,7 +3712,11 @@ def main() -> None:
         bool(args.resume)
         and expected_start == 200_000
         and expected_phase == TrainingPhase.STAGE_B1
-        and schedule_version == R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION
+        and schedule_version
+        in {
+            R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
+            KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+        }
     )
     if (
         args.research_reshard_same_global_batch
@@ -3361,6 +3776,7 @@ def main() -> None:
                 else PROFILE_CACHE_FORMAT
             ),
         )
+        ease_stats_identity = validate_ease_stats(config)
         code_identity = current_code_identity()
         batch_size = (
             int(args.batch_size_per_rank)
@@ -3384,6 +3800,8 @@ def main() -> None:
             or args.fork_stage_d_edit_calibration
             or args.fork_stage_c_unified_edit
             or args.fork_stage_c_unified_edit40
+            or args.fork_kencoder_stage_be_edit
+            or args.fork_kencoder_stage_bc_ease_control
             or args.research_fork
         )
         if args.resume and not is_fresh_fork:
@@ -3407,6 +3825,40 @@ def main() -> None:
             run_uuid = str(uuid.uuid4()) if rank == 0 else ""
             if args.fork_from_r11_stage_a:
                 origin_parent = r12_origin_parent_identity(args.resume)
+            elif args.fork_kencoder_stage_be_edit:
+                source_identity_path = (
+                    Path(args.resume).expanduser().resolve().parent.parent
+                    / "run_identity.json"
+                )
+                if not source_identity_path.is_file():
+                    raise RuntimeError(
+                        "K-Encoder Stage-BE source run identity is missing"
+                    )
+                source_identity = json.loads(
+                    source_identity_path.read_text(encoding="utf-8")
+                )
+                origin_parent = {
+                    "kind": "kencoder_stage_be_edit_fork",
+                    "source_run_identity": source_identity,
+                    "checkpoint": str(Path(args.resume).expanduser().resolve()),
+                }
+            elif args.fork_kencoder_stage_bc_ease_control:
+                source_identity_path = (
+                    Path(args.resume).expanduser().resolve().parent.parent
+                    / "run_identity.json"
+                )
+                if not source_identity_path.is_file():
+                    raise RuntimeError(
+                        "K-Encoder Ease-Control source run identity is missing"
+                    )
+                source_identity = json.loads(
+                    source_identity_path.read_text(encoding="utf-8")
+                )
+                origin_parent = {
+                    "kind": "kencoder_stage_bc_ease_control_fork",
+                    "source_run_identity": source_identity,
+                    "checkpoint": str(Path(args.resume).expanduser().resolve()),
+                }
             elif (
                 args.fork_stage_c_schedule
                 or args.fork_stage_c_research
@@ -3479,6 +3931,7 @@ def main() -> None:
             "config_sha256": canonical_sha(config),
             "base_contract_sha256": base_contract_sha(config),
             "asset_identity": asset_identity,
+            "ease_stats_identity": ease_stats_identity,
             "code_identity": code_identity,
             "production": bool(args.production),
             "research_reshard_same_global_batch": bool(
@@ -3576,9 +4029,20 @@ def main() -> None:
         if (
             current_train_contract == R13_TRAIN_CONTRACT
             and expected_start == 200_000
-            and schedule_version == R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION
+            and schedule_version
+            in {
+                R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
+                KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+            }
         ):
             schedule_fork_step = expected_start
+        elif (
+            args.fork_kencoder_stage_bc_ease_control
+            and expected_start == 250_000
+            and schedule_version
+            == KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+        ):
+            schedule_fork_step = 250_000
         elif (
             current_train_contract == R13_TRAIN_CONTRACT
             and expected_start in {400_000, 450_000}
@@ -3609,6 +4073,7 @@ def main() -> None:
         )
         ema = initialize_ema(model)
         context_update_count = 0
+        ease_update_count = 0
         ema_update_count = 0
         global_step = expected_start
         preserve_parent_rank_ratio_objective = False
@@ -3633,6 +4098,77 @@ def main() -> None:
                     current_batch_size=batch_size,
                 )
                 preserve_parent_rank_ratio_objective = True
+            if args.fork_kencoder_stage_be_edit:
+                if (
+                    conditioning_architecture_from_checkpoint(checkpoint)
+                    != "llm2vec_flux"
+                    or text_global_conditioning_from_checkpoint(checkpoint)
+                    != "llm2vec_tokens_only"
+                    or text_fusion_mode_from_checkpoint(checkpoint) != "f00"
+                ):
+                    raise RuntimeError(
+                        "Stage-BE parent is not the selected K-Encoder architecture"
+                    )
+                parent_representation, parent_contact = (
+                    base_loss_spaces_from_checkpoint(checkpoint)
+                )
+                if (
+                    parent_representation != "velocity_mse"
+                    or parent_contact != "velocity_mse"
+                ):
+                    raise RuntimeError(
+                        "Stage-BE parent does not use the K-Encoder velocity loss"
+                    )
+                parent_cache = Path(
+                    llm2vec_cache_dir_from_checkpoint(checkpoint)
+                ).expanduser().resolve()
+                requested_cache = Path(args.llm2vec_cache_dir).expanduser().resolve()
+                if parent_cache != requested_cache:
+                    raise RuntimeError(
+                        "Stage-BE parent and runtime use different LLM2Vec caches"
+                    )
+            if args.fork_kencoder_stage_bc_ease_control:
+                if int(checkpoint.get("next_global_step", -1)) != 250_000:
+                    raise RuntimeError(
+                        "Ease-Control must fork from the completed 250K parent"
+                    )
+                if (
+                    checkpoint.get("high_level_schedule_version")
+                    != KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+                ):
+                    raise RuntimeError(
+                        "Ease-Control parent is not the K-Encoder Stage-BE run"
+                    )
+                if (
+                    conditioning_architecture_from_checkpoint(checkpoint)
+                    != "llm2vec_flux"
+                    or text_global_conditioning_from_checkpoint(checkpoint)
+                    != "llm2vec_tokens_only"
+                    or text_fusion_mode_from_checkpoint(checkpoint) != "f00"
+                ):
+                    raise RuntimeError(
+                        "Ease-Control parent is not the selected K-Encoder architecture"
+                    )
+                parent_representation, parent_contact = (
+                    base_loss_spaces_from_checkpoint(checkpoint)
+                )
+                if (
+                    parent_representation != "velocity_mse"
+                    or parent_contact != "velocity_mse"
+                ):
+                    raise RuntimeError(
+                        "Ease-Control parent does not use the selected velocity loss"
+                    )
+                parent_cache = Path(
+                    llm2vec_cache_dir_from_checkpoint(checkpoint)
+                ).expanduser().resolve()
+                requested_cache = Path(
+                    args.llm2vec_cache_dir
+                ).expanduser().resolve()
+                if parent_cache != requested_cache:
+                    raise RuntimeError(
+                        "Ease-Control parent and runtime use different LLM2Vec caches"
+                    )
             if (
                 args.research_fork
                 and int(checkpoint.get("next_global_step", -1)) != expected_start
@@ -3679,6 +4215,25 @@ def main() -> None:
                 raise ValueError("Checkpoint is missing its resolved config")
             if checkpoint.get("config_sha256") != canonical_sha(embedded_config):
                 raise RuntimeError("Checkpoint embedded config SHA is invalid")
+            if args.fork_kencoder_stage_be_edit and (
+                cfg_get(embedded_config, "stage.name") != "stage_a_t2m"
+                or embedded_config.get("edit_objective") is not None
+            ):
+                raise RuntimeError(
+                    "Stage-BE must fork from the T2M-only Stage-A config"
+                )
+            if args.fork_kencoder_stage_bc_ease_control:
+                if (
+                    cfg_get(embedded_config, "stage.name")
+                    != "stage_be_kencoder_edit"
+                    or embedded_config.get("edit_objective")
+                    != config.get("edit_objective")
+                    or embedded_config.get("ease") is not None
+                ):
+                    raise RuntimeError(
+                        "Ease-Control must preserve the Stage-BE Edit objective "
+                        "and add Ease only at the 250K fork"
+                    )
             if args.fork_stage_c_unified_edit40:
                 validate_unified_edit40_objective(embedded_config, config)
             expected_base_contract_sha = base_contract_sha(config)
@@ -3736,6 +4291,14 @@ def main() -> None:
                     and int(checkpoint.get("next_global_step", -1)) == 450_000
                 )
                 valid_schedule_fork = valid_schedule_fork or (
+                    args.fork_kencoder_stage_bc_ease_control
+                    and checkpoint_schedule_version
+                    == KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION
+                    and schedule_version
+                    == KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION
+                    and int(checkpoint.get("next_global_step", -1)) == 250_000
+                )
+                valid_schedule_fork = valid_schedule_fork or (
                     current_train_contract == R13_TRAIN_CONTRACT
                     and (
                         (
@@ -3769,7 +4332,10 @@ def main() -> None:
                             checkpoint_schedule_version
                             == HIGH_LEVEL_SCHEDULE_VERSION
                             and schedule_version
-                            == R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION
+                            in {
+                                R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
+                                KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+                            }
                             and int(checkpoint.get("next_global_step", -1)) == 200_000
                         )
                     )
@@ -3893,7 +4459,7 @@ def main() -> None:
                             f"checkpoint={checkpoint_cache!r}, "
                             f"requested={requested_cache!r}"
                         )
-                if has_research_treatment:
+                if has_effective_research_treatment:
                     validate_research_resume_objective(
                         checkpoint_runtime, research_overrides
                     )
@@ -3916,10 +4482,26 @@ def main() -> None:
                     raise RuntimeError("R12 checkpoint/run origin lineage mismatch")
             if checkpoint.get("asset_identity") != asset_identity:
                 raise RuntimeError("Checkpoint/data asset identity mismatch")
-            if checkpoint.get("optimizer_group_manifest") != optimizer_manifest:
-                raise RuntimeError("Checkpoint optimizer parameter-name manifest mismatch")
-            model.load_state_dict(checkpoint["model"], strict=True)
-            optimizer.load_state_dict(checkpoint["optimizer"])
+            if not args.fork_kencoder_stage_bc_ease_control and (
+                checkpoint.get("ease_stats_identity") != ease_stats_identity
+            ):
+                raise RuntimeError("Checkpoint/configured Ease stats semantics mismatch")
+            if args.fork_kencoder_stage_bc_ease_control:
+                load_parent_model_with_new_ease(model, checkpoint["model"])
+                migrate_optimizer_state_with_new_ease(
+                    optimizer,
+                    parent_state=checkpoint["optimizer"],
+                    parent_manifest=checkpoint["optimizer_group_manifest"],
+                    current_manifest=optimizer_manifest,
+                )
+            else:
+                if checkpoint.get("optimizer_group_manifest") != optimizer_manifest:
+                    raise RuntimeError(
+                        "Checkpoint optimizer parameter-name manifest mismatch"
+                    )
+                model.load_state_dict(checkpoint["model"], strict=True)
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            assert_model_ease_stats(model, ease_stats_identity)
             global_step = int(checkpoint["next_global_step"])
             if int(checkpoint.get("phase_id", -1)) != int(phase_for_step(global_step)):
                 raise RuntimeError("Checkpoint saved phase_id is inconsistent")
@@ -3949,6 +4531,7 @@ def main() -> None:
             if batcher.scheduler.state.next_step != global_step:
                 raise RuntimeError("Batcher/checkpoint next step mismatch")
             context_update_count = int(checkpoint["context_update_count"])
+            ease_update_count = int(checkpoint.get("ease_update_count", 0))
             ema_update_count = int(checkpoint.get("ema_update_count", -1))
             expected_ema_count = expected_ema_updates(
                 global_step, int(cfg_get(config, "training.ema_every"))
@@ -3960,9 +4543,16 @@ def main() -> None:
             _assert_context_optimizer_count(
                 optimizer, model, context_update_count
             )
-            ema = {
-                key: value.to(device=device) for key, value in checkpoint["ema"].items()
-            }
+            _assert_ease_optimizer_count(
+                optimizer, model, ease_update_count
+            )
+            if args.fork_kencoder_stage_bc_ease_control:
+                ema = initialize_ema_with_new_ease(model, checkpoint["ema"])
+            else:
+                ema = {
+                    key: value.to(device=device)
+                    for key, value in checkpoint["ema"].items()
+                }
             if not _normalizer_matches(normalizer, checkpoint["normalizer"]):
                 raise RuntimeError("Checkpoint normalizer differs from frozen stats")
             random.setstate(checkpoint["rng"]["python"])
@@ -4125,10 +4715,9 @@ def main() -> None:
                 edit_loss_weights is not None and stream == TrainStream.MOTION_EDIT
             )
             if unified_edit_step:
-                decomposed_cfg_edit = schedule_version in {
-                    UNIFIED_EDIT_DECOMPOSED_CFG_SCHEDULE_VERSION,
-                    UNIFIED_EDIT_DECOMPOSED_CFG_EDIT80_SCHEDULE_VERSION,
-                }
+                decomposed_cfg_edit = (
+                    schedule_version in DECOMPOSED_CFG_EDIT_SCHEDULE_VERSIONS
+                )
                 allowed_patterns = (
                     {
                         EditConditionPattern.SOURCE_TEXT,
@@ -4301,7 +4890,7 @@ def main() -> None:
             discrepancy_mask_bundle: SourceTargetDiscrepancyMask | None = None
             if (
                 unified_edit_step
-                and has_research_treatment
+                and collect_research_diagnostics
                 and edit_discrepancy_x0_scale > 0.0
             ):
                 discrepancy_mask_bundle = build_source_target_discrepancy_mask(
@@ -4395,9 +4984,9 @@ def main() -> None:
                             x_self_cond=None,
                             text_drop_prob=0.0,
                             condition=repeated_condition,
-                            return_details=has_research_treatment,
+                            return_details=collect_research_diagnostics,
                         )
-                        if has_research_treatment:
+                        if collect_research_diagnostics:
                             if not isinstance(paired_output, KimodoContextFlowOutput):
                                 raise TypeError("Research Edit forward must return details")
                             paired_details_for_grad = paired_output
@@ -4429,10 +5018,10 @@ def main() -> None:
                             text_drop_prob=0.0,
                             condition=condition,
                             return_details=bool(
-                                unified_edit_step and has_research_treatment
+                                unified_edit_step and collect_research_diagnostics
                             ),
                         )
-                        if unified_edit_step and has_research_treatment:
+                        if unified_edit_step and collect_research_diagnostics:
                             if not isinstance(single_output, KimodoContextFlowOutput):
                                 raise TypeError(
                                     "Research Edit forward must return details"
@@ -4748,6 +5337,14 @@ def main() -> None:
             source_present = bool(condition.source_present.any().item())
             edit_task_present = bool((condition.task_id == int(TaskId.EDIT)).any().item())
             context_active = source_present or edit_task_present
+            ease_active_tensor = torch.tensor(
+                [int(bool(condition.ease_present.any().item()))],
+                device=device,
+                dtype=torch.int32,
+            )
+            if is_distributed():
+                dist.all_reduce(ease_active_tensor, op=dist.ReduceOp.MAX)
+            ease_active = bool(ease_active_tensor.item())
             assert_and_mask_context_gradients(
                 raw_model,
                 context_active=context_active,
@@ -4755,11 +5352,20 @@ def main() -> None:
                 optimizer=optimizer,
                 schedule_version=schedule_version,
             )
+            assert_and_mask_ease_gradients(
+                raw_model,
+                ease_active=ease_active,
+                optimizer=optimizer,
+            )
             base_grad_norm = tensor_group_norm(raw_model.base_parameters())
             context_grad_norm = tensor_group_norm(
                 (*raw_model.context_weight_parameters(), *raw_model.context_bias_parameters())
             )
+            ease_grad_norm = tensor_group_norm(
+                (*raw_model.ease_weight_parameters(), *raw_model.ease_bias_parameters())
+            )
             context_steps_before = _context_optimizer_steps(optimizer, raw_model)
+            ease_steps_before = _ease_optimizer_steps(optimizer, raw_model)
             before_update = update_sampler.snapshot()
             total_grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(raw_model.parameters(), grad_clip).item()
@@ -4774,6 +5380,14 @@ def main() -> None:
                         raise RuntimeError("Context-inactive step advanced context Adam state")
                 else:
                     context_update_count += 1
+                if not ease_active:
+                    ease_steps_after = _ease_optimizer_steps(optimizer, raw_model)
+                    if ease_steps_before != ease_steps_after:
+                        raise RuntimeError(
+                            "Ease-inactive step advanced Ease Adam state"
+                        )
+                else:
+                    ease_update_count += 1
             update_metrics = update_sampler.differences(before_update)
             if not args.research_no_update and global_step % ema_every == 0:
                 update_ema(ema, raw_model, ema_decay)
@@ -4918,11 +5532,16 @@ def main() -> None:
                 "grad/total_preclip": total_grad_norm,
                 "grad/base_preclip": base_grad_norm,
                 "grad/context_preclip": context_grad_norm,
+                "grad/ease_preclip": ease_grad_norm,
                 "grad/clip_active": float(total_grad_norm > grad_clip),
                 "batch/mask_fraction": float(hard_mask.float().mean().item()),
                 "batch/source_present": float(source_present),
                 "batch/edit_task_present": float(edit_task_present),
                 "batch/context_active": float(context_active),
+                "batch/ease_active": float(ease_active),
+                "batch/ease_present_fraction": float(
+                    condition.ease_present.float().mean().item()
+                ),
                 "batch/source_present_fraction": float(
                     condition.source_present.any(dim=1).float().mean().item()
                 ),
@@ -5531,6 +6150,7 @@ def main() -> None:
                         )
                 metrics["train/next_global_step"] = float(global_step)
                 metrics["train/context_update_count"] = float(context_update_count)
+                metrics["train/ease_update_count"] = float(ease_update_count)
                 metrics["train/ema_update_count"] = float(ema_update_count)
                 metrics["train/hml_t2m_expected"] = batcher.hml_t2m_integrity.expected
                 metrics["train/hml_t2m_realized"] = float(
@@ -5614,8 +6234,10 @@ def main() -> None:
                         next_global_step=global_step,
                         batcher=batcher,
                         context_update_count=context_update_count,
+                        ease_update_count=ease_update_count,
                         optimizer_manifest=optimizer_manifest,
                         asset_identity=asset_identity,
+                        ease_stats_identity=ease_stats_identity,
                         normalizer=normalizer,
                         run_name=args.name,
                         run_uuid=run_uuid,
@@ -5637,6 +6259,7 @@ def main() -> None:
                         "run": args.name,
                         "next_global_step": global_step,
                         "context_update_count": context_update_count,
+                        "ease_update_count": ease_update_count,
                         "hml_t2m_integrity": batcher.state_dict()["hml_t2m_integrity"],
                     },
                     sort_keys=True,

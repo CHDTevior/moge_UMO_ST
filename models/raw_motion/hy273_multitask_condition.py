@@ -13,17 +13,22 @@ from .hy273_slices import DIM_HY273
 
 ABSOLUTE_TEXT_PROFILE = "hytext_absolute_motion_v1"
 RELATIVE_EDIT_TEXT_PROFILE = "hytext_relative_edit_v1"
+INTERACTION_TEXT_PROFILE = "hytext_interaction_v1"
 
 
 class TrainStream(IntEnum):
     HML_MIXED = 0
     MOTION_EDIT = 1
+    REACTION = 2
+    # Historical name used by the archived two-actor experiment.
+    INTERACTION = 2
 
 
 class TaskId(IntEnum):
     GENERATE = 0
     EDIT = 1
     REACTION = 2
+    INTERACTION = 3
 
 
 class CapabilityId(IntEnum):
@@ -31,6 +36,9 @@ class CapabilityId(IntEnum):
     KIMODO_CONTROL = 1
     MOTION_EDIT = 2
     MOTION_EDIT_CONTROL = 3
+    TEXT_REACTION = 4
+    # Historical name used by the archived two-actor experiment.
+    TEXT_INTERACTION = 4
 
 
 class TargetOp(IntEnum):
@@ -44,6 +52,8 @@ class SourceRole(IntEnum):
     SELF = 1
     OTHER_ACTOR = 2
     SCENE = 3
+    OTHER_ACTOR_FIRST_PERSON = 4
+    OTHER_ACTOR_SECOND_PERSON = 5
 
 
 class TextKind(IntEnum):
@@ -106,6 +116,8 @@ class ConditionBatch:
     requested_target_len: torch.Tensor
     frame_gauge_dir: torch.Tensor
     frame_policy_id: torch.Tensor
+    ease_physical: torch.Tensor
+    ease_present: torch.Tensor
     target_to_source_time_map: torch.Tensor | None = None
 
     @property
@@ -140,6 +152,8 @@ class ConditionBatch:
         _require_tensor("requested_target_len", self.requested_target_len, (bsz,))
         _require_tensor("frame_gauge_dir", self.frame_gauge_dir, (bsz, 2))
         _require_tensor("frame_policy_id", self.frame_policy_id, (bsz,))
+        _require_tensor("ease_physical", self.ease_physical, (bsz, 6))
+        _require_tensor("ease_present", self.ease_present, (bsz,))
         if len(self.text_encoding_profile) != bsz:
             raise ValueError(
                 f"Expected {bsz} text profiles, got {len(self.text_encoding_profile)}"
@@ -173,6 +187,7 @@ class ConditionBatch:
             "source_present": self.source_present,
             "source_time_valid": self.source_time_valid,
             "source_value_mask": self.source_value_mask,
+            "ease_present": self.ease_present,
         }
         for name, value in bool_fields.items():
             if value.dtype != torch.bool:
@@ -180,6 +195,7 @@ class ConditionBatch:
         for name, value in {
             "source_motion": self.source_motion,
             "frame_gauge_dir": self.frame_gauge_dir,
+            "ease_physical": self.ease_physical,
             "target_to_source_time_map": self.target_to_source_time_map,
         }.items():
             if value is not None and not bool(torch.isfinite(value).all()):
@@ -215,6 +231,8 @@ class ConditionBatch:
             raise ValueError("Present source slots cannot use SourceRole.NULL")
         if bool((source_lengths[self.source_present] <= 0).any()):
             raise ValueError("Present source slots must have positive native length")
+        if bool(torch.count_nonzero(self.ease_physical[~self.ease_present])):
+            raise ValueError("Absent Ease sentinel must be exact physical zero")
         visible_by_slot = self.source_value_mask.reshape(bsz, slots, -1).any(dim=-1)
         if bool((self.source_present & ~visible_by_slot).any()):
             raise ValueError("Present source slots must expose at least one source value")
@@ -293,6 +311,8 @@ class ConditionBatch:
                 # Source-free EDIT rows are the task-local text-only and
                 # unconditional branches required to train hierarchical CFG;
                 # callers must opt into the extended (non-v1-strict) contract.
+                if bool(self.ease_present[index]):
+                    raise ValueError("EDIT samples cannot carry Ease conditioning")
                 if not has_source and v1_strict:
                     raise ValueError("EDIT samples require a source motion")
                 if bool((ops != int(TargetOp.EDIT)).any()):
@@ -316,8 +336,37 @@ class ConditionBatch:
                     raise ValueError(
                         "v1 MotionFix EDIT requires FramePolicy.INDEPENDENT_SEQUENCE"
                     )
+            elif task == TaskId.REACTION:
+                if bool(self.ease_present[index]):
+                    raise ValueError("REACTION samples cannot carry Ease conditioning")
+                if not has_source and v1_strict:
+                    raise ValueError("REACTION samples require an observed actor")
+                if bool((ops != int(TargetOp.GENERATE)).any()):
+                    raise ValueError("REACTION samples require TargetOp.GENERATE")
+                if profile != INTERACTION_TEXT_PROFILE:
+                    raise ValueError(
+                        "REACTION samples require the interaction-text profile"
+                    )
+                if stream != TrainStream.REACTION:
+                    raise ValueError("REACTION samples must come from REACTION")
+                if capability != CapabilityId.TEXT_REACTION:
+                    raise ValueError("REACTION capability is inconsistent")
+                reaction_roles = self.source_role_id[index][self.source_present[index]]
+                valid_reaction_roles = (
+                    (reaction_roles == int(SourceRole.OTHER_ACTOR_FIRST_PERSON))
+                    | (reaction_roles == int(SourceRole.OTHER_ACTOR_SECOND_PERSON))
+                )
+                if has_source and not bool(valid_reaction_roles.all()):
+                    raise ValueError(
+                        "REACTION sources must identify whether the observed actor "
+                        "is the first or second person in the interaction text"
+                    )
+                if slots != 1:
+                    raise ValueError("REACTION requires exactly one source slot")
+                if FramePolicy(int(self.frame_policy_id[index])) != FramePolicy.SHARED_WORLD:
+                    raise ValueError("REACTION requires FramePolicy.SHARED_WORLD")
             elif v1_strict:
-                raise ValueError("REACTION is reserved but not trainable in v1")
+                raise ValueError("Two-actor INTERACTION is outside the v1 condition contract")
 
 
 def make_absent_condition(
@@ -374,6 +423,10 @@ def make_absent_condition(
         frame_policy_id=torch.full(
             (batch_size,), int(FramePolicy.INDEPENDENT_SEQUENCE), device=device, dtype=torch.long
         ),
+        ease_physical=torch.zeros(
+            batch_size, 6, device=device, dtype=torch.float32
+        ),
+        ease_present=torch.zeros(batch_size, device=device, dtype=torch.bool),
         target_to_source_time_map=torch.zeros(
             batch_size, 1, target_frames, device=device, dtype=torch.float32
         ),

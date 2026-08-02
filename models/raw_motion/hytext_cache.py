@@ -145,6 +145,63 @@ class HYTextMemmapCache:
             return "persistent_cache"
         return None
 
+    def storage_numpy_dtype(self) -> np.dtype:
+        """Return the dtype used by persistent cache rows."""
+
+        configured = self.manifest.get("storage_dtype")
+        if configured is not None:
+            aliases = {
+                "fp16": np.dtype(np.float16),
+                "float16": np.dtype(np.float16),
+                "fp32": np.dtype(np.float32),
+                "float32": np.dtype(np.float32),
+            }
+            dtype = aliases.get(str(configured).lower())
+            if dtype is None:
+                raise ValueError(
+                    f"Unsupported HYText cache storage_dtype={configured!r}"
+                )
+            if self.index:
+                first = next(iter(self.index.values()))
+                opened = self._open_shard(str(first["shard"]))
+                ctxt_dtype = np.dtype(opened["ctxt"].dtype)
+                vtxt_dtype = np.dtype(opened["vtxt"].dtype)
+                if ctxt_dtype != dtype or vtxt_dtype != dtype:
+                    raise ValueError(
+                        "HYText cache arrays differ from manifest storage_dtype"
+                    )
+            return dtype
+        if self.index:
+            first = next(iter(self.index.values()))
+            opened = self._open_shard(str(first["shard"]))
+            ctxt_dtype = np.dtype(opened["ctxt"].dtype)
+            vtxt_dtype = np.dtype(opened["vtxt"].dtype)
+            if ctxt_dtype != vtxt_dtype:
+                raise ValueError(
+                    "HYText cache ctxt/vtxt arrays use different storage dtypes"
+                )
+            if ctxt_dtype not in {np.dtype(np.float16), np.dtype(np.float32)}:
+                raise ValueError(
+                    f"Unsupported HYText cache array dtype={ctxt_dtype}"
+                )
+            return ctxt_dtype
+        return np.dtype(np.float32)
+
+    def storage_round_trip(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Match the float32-to-storage conversion used by cache builders."""
+
+        if not torch.is_floating_point(tensor):
+            raise TypeError("HYText cache values must be floating-point tensors")
+        source = tensor.detach().float().cpu()
+        if not bool(torch.isfinite(source).all()):
+            raise ValueError("Runtime HYText rows contain non-finite values")
+        array = source.numpy().astype(self.storage_numpy_dtype(), copy=True)
+        if not bool(np.isfinite(array).all()):
+            raise ValueError(
+                "Runtime HYText rows overflowed the persistent storage dtype"
+            )
+        return torch.from_numpy(array)
+
     def add_runtime_rows(
         self,
         texts: Iterable[str],
@@ -155,7 +212,7 @@ class HYTextMemmapCache:
     ) -> None:
         """Register in-memory HYText rows without mutating the training cache."""
 
-        text_list = [str(text) for text in texts]
+        text_list = [normalize_text_key(str(text)) for text in texts]
         if profiles is None:
             profile_list: list[str | None] = [None] * len(text_list)
         else:
@@ -164,7 +221,11 @@ class HYTextMemmapCache:
                 raise ValueError(
                     f"Expected {len(text_list)} HYText profiles, got {len(profile_list)}"
                 )
-        if vtxt.ndim != 3 or vtxt.shape[0] != len(text_list):
+        if (
+            vtxt.ndim != 3
+            or vtxt.shape[0] != len(text_list)
+            or vtxt.shape[1] != 1
+        ):
             raise ValueError("Runtime HYText vtxt must have shape [B,1,D]")
         if ctxt.ndim != 3 or ctxt.shape[0] != len(text_list):
             raise ValueError("Runtime HYText ctxt must have shape [B,L,D]")
@@ -174,10 +235,20 @@ class HYTextMemmapCache:
             raise ValueError("Runtime HYText vtxt dimension differs from the cache contract")
         if int(ctxt.shape[-1]) != int(self.manifest.get("ctxt_dim", ctxt.shape[-1])):
             raise ValueError("Runtime HYText ctxt dimension differs from the cache contract")
+        expected_length = self.manifest.get("max_length_llm")
+        if expected_length is not None and int(ctxt.shape[1]) != int(expected_length):
+            raise ValueError(
+                "Runtime HYText token length differs from the cache contract"
+            )
+        length_values = lengths.detach().long().cpu()
+        if bool((length_values < 0).any()) or bool(
+            (length_values > int(ctxt.shape[1])).any()
+        ):
+            raise ValueError("Runtime HYText lengths are outside the token array")
 
-        vtxt_rows = vtxt.detach().float().cpu().numpy()
-        ctxt_rows = ctxt.detach().float().cpu().numpy()
-        length_rows = lengths.detach().long().cpu().numpy()
+        vtxt_rows = self.storage_round_trip(vtxt).numpy()
+        ctxt_rows = self.storage_round_trip(ctxt).numpy()
+        length_rows = length_values.numpy()
         for index, (text, profile) in enumerate(zip(text_list, profile_list)):
             key = self._key(text, profile)
             self._runtime_rows[key] = (

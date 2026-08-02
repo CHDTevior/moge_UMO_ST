@@ -8,6 +8,8 @@ import pytest
 import torch
 
 from data.hy273_multitask_scheduler import (
+    KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
     R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
 )
 from models.raw_motion.hy273_multitask_condition import (
@@ -27,8 +29,13 @@ from train_hy273_multitask import (
     _context_optimizer_steps,
     apply_optimizer_phase,
     assert_and_mask_context_gradients,
+    initialize_ema,
+    initialize_ema_with_new_ease,
+    load_parent_model_with_new_ease,
+    migrate_optimizer_state_with_new_ease,
     optimizer_groups,
 )
+from models.raw_motion.hy273_ease import EASE_STATS_FORMAT
 
 
 def _stats(root: Path) -> tuple[Path, Path]:
@@ -60,6 +67,32 @@ def _model(tmp_path: Path) -> HY273KimodoContextFlow:
     )
 
 
+def _ease_model(tmp_path: Path) -> HY273KimodoContextFlow:
+    full, local = _stats(tmp_path)
+    ease = tmp_path / "ease"
+    ease.mkdir()
+    np.save(ease / "Mean.npy", np.zeros(6, dtype=np.float32))
+    np.save(ease / "Std.npy", np.ones(6, dtype=np.float32))
+    (ease / "metadata.json").write_text(
+        '{"feature_dim": 6, "format": "' + EASE_STATS_FORMAT + '"}'
+    )
+    return HY273KimodoContextFlow(
+        hidden_dim=16,
+        num_heads=4,
+        root_depth_double=1,
+        root_depth_single=1,
+        body_depth_double=1,
+        body_depth_single=1,
+        text_encoder="none",
+        max_text_tokens=4,
+        motion_stats_dir=full,
+        local_root_stats_dir=local,
+        max_frames=8,
+        use_ease=True,
+        ease_stats_dir=ease,
+    )
+
+
 def _edit_condition(frames: int = 4) -> ConditionBatch:
     valid = torch.ones(1, frames, dtype=torch.bool)
     source = torch.zeros(1, 1, frames, 273)
@@ -80,6 +113,8 @@ def _edit_condition(frames: int = 4) -> ConditionBatch:
         requested_target_len=torch.tensor([frames]),
         frame_gauge_dir=torch.tensor([[1.0, 0.0]]),
         frame_policy_id=torch.tensor([int(FramePolicy.INDEPENDENT_SEQUENCE)]),
+        ease_physical=torch.zeros(1, 6),
+        ease_present=torch.zeros(1, dtype=torch.bool),
     )
     condition.validate(max_target_frames=8)
     return condition
@@ -189,6 +224,109 @@ def test_r16_stage_b_keeps_edit_context_frozen(tmp_path: Path) -> None:
             optimizer=optimizer,
             schedule_version=R16_STAGE_B_FIXED_CONTROL_SCHEDULE_VERSION,
         )
+
+
+def test_kencoder_stage_be_updates_edit_context_in_stage_b1(tmp_path: Path) -> None:
+    model = _model(tmp_path)
+    groups, _ = optimizer_groups(
+        model,
+        200_000,
+        KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    )
+    optimizer = torch.optim.AdamW(groups)
+    resolved = {
+        group["group_name"]: group["lr"] for group in optimizer.param_groups
+    }
+    assert resolved == {
+        "G0_existing": 5e-5,
+        "G1_context_weight": 1e-4,
+        "G2_context_bias": 1e-4,
+    }
+
+    _backward(model, _edit_condition())
+    assert_and_mask_context_gradients(
+        model,
+        context_active=True,
+        global_step=200_000,
+        optimizer=optimizer,
+        schedule_version=KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    )
+    optimizer.step()
+    assert set(_context_optimizer_steps(optimizer, model).values()) == {1}
+
+
+def test_ease_fork_preserves_model_ema_and_adam_by_parameter_name(
+    tmp_path: Path,
+) -> None:
+    parent_root = tmp_path / "parent"
+    child_root = tmp_path / "child"
+    parent = _model(parent_root)
+    parent_groups, parent_manifest = optimizer_groups(
+        parent,
+        200_000,
+        KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+    )
+    parent_optimizer = torch.optim.AdamW(parent_groups)
+    for parameter in parent.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    parent_optimizer.step()
+    parent_ema = initialize_ema(parent)
+
+    child = _ease_model(child_root)
+    missing = load_parent_model_with_new_ease(child, parent.state_dict())
+    assert missing
+    assert all(name.startswith("ease_conditioner.") for name in missing)
+    child_groups, child_manifest = optimizer_groups(
+        child,
+        250_000,
+        KENCODER_STAGE_BC_EASE_CONTROL_SCHEDULE_VERSION,
+    )
+    child_optimizer = torch.optim.AdamW(child_groups)
+    migrate_optimizer_state_with_new_ease(
+        child_optimizer,
+        parent_state=parent_optimizer.state_dict(),
+        parent_manifest=parent_manifest,
+        current_manifest=child_manifest,
+    )
+    parent_names = dict(parent.named_parameters())
+    child_names = dict(child.named_parameters())
+    for name, parent_parameter in parent_names.items():
+        assert torch.equal(child_names[name], parent_parameter)
+        if parent_parameter.requires_grad:
+            assert child_names[name] in child_optimizer.state
+    for name, parameter in child_names.items():
+        if name.startswith("ease_conditioner."):
+            assert parameter not in child_optimizer.state
+
+    child_ema = initialize_ema_with_new_ease(child, parent_ema)
+    for name in parent_ema:
+        assert torch.equal(child_ema[name], parent_ema[name])
+    assert all(
+        name in child_ema
+        for name in child.state_dict()
+        if name.startswith("ease_conditioner.")
+    )
+
+    condition = make_absent_condition(batch_size=1, target_frames=4)
+    model_in = torch.randn(1, 4, 546)
+    parent.eval()
+    child.eval()
+    with torch.no_grad():
+        parent_output = parent(
+            model_in,
+            t=torch.tensor([0.5]),
+            text=[""],
+            length_mask=condition.target_valid,
+            condition=condition,
+        )
+        child_output = child(
+            model_in,
+            t=torch.tensor([0.5]),
+            text=[""],
+            length_mask=condition.target_valid,
+            condition=condition,
+        )
+    assert torch.equal(parent_output, child_output)
 
 
 def test_phase_learning_rates_are_overwritten_after_load(tmp_path: Path) -> None:
