@@ -28,8 +28,8 @@ REQUIRED_VARIANTS = ("source_text", *CAUSAL_VARIANTS)
 EXPECTED_FORMAT = "hy273_fixed_role_reaction_eval_v2"
 EXPECTED_DATASET = "Inter-X K273"
 EXPECTED_ASSIGNMENT = "fixed_source_actor_to_target_reactor_no_swap"
-EXPECTED_CHECKPOINT_STEP = 150_000
-EXPECTED_VAL_COUNT = 522
+DEFAULT_CHECKPOINT_STEP = 150_000
+EXPECTED_SPLIT_COUNTS = {"val": 522, "test": 1_579}
 EXPECTED_SAMPLING = {
     "num_steps": 32,
     "source_cfg_scale": 2.0,
@@ -54,6 +54,7 @@ MEAN_METRICS = (
     "first_close_timing_error_s_20cm",
     "first_close_too_early_s_20cm",
     "first_close_too_late_s_20cm",
+    "reactor_fk_jerk_error_mps3",
 )
 LAYOUT_PHASE_MEAN_METRICS = (
     "frame0_relative_root_error_cm",
@@ -78,6 +79,17 @@ LAYOUT_PHASE_POOLED_METRICS = {
         "precontact_valid_frames_20cm",
     ),
 }
+CONTACT_LIFECYCLE_POOLED_METRICS = {
+    "fk_contact_vector_error_cm_15cm": (
+        "fk_contact_vector_error_sum_cm_15cm",
+        "fk_contact_vector_target_pairs_15cm",
+    ),
+}
+PREDICTION_REPORT_CONSISTENCY_METRICS = (
+    "reactor_fk_mpjpe_cm",
+    "reactor_root_error_cm",
+    "fk_relation_distance_mae_cm",
+)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -176,6 +188,37 @@ def _recompute_metrics_from_predictions(
             fps=30.0,
         )["per_sample"]
         for report_row, metric_row in zip(report_rows, metrics):
+            for metric in PREDICTION_REPORT_CONSISTENCY_METRICS:
+                if metric not in report_row:
+                    raise ValueError(
+                        f"Report row {uid} variant={report_row['variant']!r} "
+                        f"is missing required consistency metric {metric}"
+                    )
+                try:
+                    reported = float(report_row[metric])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        f"Report row {uid} variant={report_row['variant']!r} "
+                        f"has non-numeric consistency metric {metric}="
+                        f"{report_row[metric]!r}"
+                    ) from error
+                if not math.isfinite(reported):
+                    raise ValueError(
+                        f"Report row {uid} variant={report_row['variant']!r} "
+                        f"has non-finite consistency metric {metric}={reported}"
+                    )
+                recomputed = float(metric_row[metric])
+                if not math.isclose(
+                    reported,
+                    recomputed,
+                    rel_tol=1.0e-6,
+                    abs_tol=1.0e-4,
+                ):
+                    raise ValueError(
+                        f"Saved predictions do not match report row {uid} "
+                        f"variant={report_row['variant']!r}: {metric} "
+                        f"reported={reported}, recomputed={recomputed}"
+                    )
             report_row.update(
                 {
                     key: value
@@ -190,19 +233,29 @@ def _recompute_metrics_from_predictions(
         "fps": 30.0,
         "uids": len(uids),
         "variants": list(REQUIRED_VARIANTS),
+        "report_consistency_metrics": list(
+            PREDICTION_REPORT_CONSISTENCY_METRICS
+        ),
     }
     return payload
 
 
-def _validate_single_protocol(payload: dict[str, Any], label: str) -> None:
+def _validate_single_protocol(
+    payload: dict[str, Any],
+    label: str,
+    *,
+    expected_checkpoint_step: int,
+    expected_split: str,
+) -> None:
+    expected_count = EXPECTED_SPLIT_COUNTS[expected_split]
     expected_scalars = {
         "format": EXPECTED_FORMAT,
         "dataset": EXPECTED_DATASET,
-        "split": "val",
+        "split": expected_split,
         "caption_policy": "uid_balanced",
         "weight_source": "ema",
         "assignment_rule": EXPECTED_ASSIGNMENT,
-        "checkpoint_next_global_step": EXPECTED_CHECKPOINT_STEP,
+        "checkpoint_next_global_step": expected_checkpoint_step,
     }
     for field, expected in expected_scalars.items():
         actual = payload.get(field)
@@ -225,15 +278,15 @@ def _validate_single_protocol(payload: dict[str, Any], label: str) -> None:
     if not isinstance(selection, dict):
         raise ValueError(f"{label} has no selection metadata")
     expected_selection = {
-        "count": EXPECTED_VAL_COUNT,
-        "dataset_count_after_filters": EXPECTED_VAL_COUNT,
+        "count": expected_count,
+        "dataset_count_after_filters": expected_count,
         "start_index": 0,
     }
     for field, expected in expected_selection.items():
         actual = selection.get(field)
         if actual != expected:
             raise ValueError(
-                f"{label} is not the complete fixed Val selection for {field}: "
+                f"{label} is not the complete fixed {expected_split} selection for {field}: "
                 f"{actual!r} != {expected!r}"
             )
 
@@ -242,10 +295,10 @@ def _validate_single_protocol(payload: dict[str, Any], label: str) -> None:
         raise ValueError(f"{label} has no per_sample mapping")
     for variant in REQUIRED_VARIANTS:
         rows = variants.get(variant)
-        if not isinstance(rows, list) or len(rows) != EXPECTED_VAL_COUNT:
+        if not isinstance(rows, list) or len(rows) != expected_count:
             raise ValueError(
                 f"{label} variant {variant!r} is incomplete: "
-                f"{len(rows) if isinstance(rows, list) else None} != {EXPECTED_VAL_COUNT}"
+                f"{len(rows) if isinstance(rows, list) else None} != {expected_count}"
             )
 
     causal = payload.get("protocols", {}).get("causal_ablations")
@@ -256,9 +309,25 @@ def _validate_single_protocol(payload: dict[str, Any], label: str) -> None:
         raise ValueError(f"{label} lacks the complete negative-donor protocol")
 
 
-def _validate_protocol(baseline: dict[str, Any], candidate: dict[str, Any]) -> None:
-    _validate_single_protocol(baseline, "baseline")
-    _validate_single_protocol(candidate, "candidate")
+def _validate_protocol(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    expected_checkpoint_step: int,
+    expected_split: str,
+) -> None:
+    _validate_single_protocol(
+        baseline,
+        "baseline",
+        expected_checkpoint_step=expected_checkpoint_step,
+        expected_split=expected_split,
+    )
+    _validate_single_protocol(
+        candidate,
+        "candidate",
+        expected_checkpoint_step=expected_checkpoint_step,
+        expected_split=expected_split,
+    )
     scalar_fields = ("split", "caption_policy", "weight_source", "assignment_rule")
     for field in scalar_fields:
         if baseline.get(field) != candidate.get(field):
@@ -298,7 +367,12 @@ def _config_differences(
     return []
 
 
-def _load_checkpoint_contract(payload: dict[str, Any], label: str) -> dict[str, Any]:
+def _load_checkpoint_contract(
+    payload: dict[str, Any],
+    label: str,
+    *,
+    expected_checkpoint_step: int,
+) -> dict[str, Any]:
     try:
         import torch
         from torch._subclasses.fake_tensor import FakeTensorMode
@@ -309,8 +383,12 @@ def _load_checkpoint_contract(payload: dict[str, Any], label: str) -> dict[str, 
     if not isinstance(checkpoint_value, str):
         raise ValueError(f"{label} has no checkpoint path")
     checkpoint_path = Path(checkpoint_value).expanduser().resolve(strict=True)
-    if checkpoint_path.name != "step_00150000.pt":
-        raise ValueError(f"{label} is not the fixed 150K checkpoint: {checkpoint_path}")
+    expected_name = f"step_{expected_checkpoint_step:08d}.pt"
+    if checkpoint_path.name != expected_name:
+        raise ValueError(
+            f"{label} is not the fixed {expected_checkpoint_step} checkpoint: "
+            f"{checkpoint_path}"
+        )
     with FakeTensorMode():
         checkpoint = torch.load(
             checkpoint_path,
@@ -320,8 +398,10 @@ def _load_checkpoint_contract(payload: dict[str, Any], label: str) -> dict[str, 
         )
     if checkpoint.get("format") != "hy273_unified_actor_checkpoint_v1":
         raise ValueError(f"{label} has unexpected checkpoint format")
-    if checkpoint.get("next_global_step") != EXPECTED_CHECKPOINT_STEP:
-        raise ValueError(f"{label} checkpoint is not at 150K")
+    if checkpoint.get("next_global_step") != expected_checkpoint_step:
+        raise ValueError(
+            f"{label} checkpoint is not at {expected_checkpoint_step}"
+        )
     if payload.get("checkpoint_next_global_step") != checkpoint.get("next_global_step"):
         raise ValueError(f"{label} evaluation/checkpoint step metadata disagree")
     config = checkpoint.get("config")
@@ -345,9 +425,18 @@ def _validate_training_contract(
     candidate: dict[str, Any],
     *,
     mode: str,
+    expected_checkpoint_step: int,
 ) -> dict[str, Any]:
-    left = _load_checkpoint_contract(baseline, "baseline")
-    right = _load_checkpoint_contract(candidate, "candidate")
+    left = _load_checkpoint_contract(
+        baseline,
+        "baseline",
+        expected_checkpoint_step=expected_checkpoint_step,
+    )
+    right = _load_checkpoint_contract(
+        candidate,
+        "candidate",
+        expected_checkpoint_step=expected_checkpoint_step,
+    )
     differences = _config_differences(left["config"], right["config"])
     if mode == "p_only_ablation":
         expected_differences = [
@@ -387,6 +476,17 @@ def _validate_training_contract(
             (("reaction_loss", "layout_precontact_multiplier"), None, 2.0),
             (("reaction_loss", "relative_heading"), 0.0, 0.0217),
             (("reaction_loss", "relative_root"), 0.0, 0.0195),
+        ]
+    elif mode == "reaction_v5_1_full_contact":
+        expected_differences = [
+            (("reaction_loss", "fk_contact_map_negative"), None, 0.005),
+            (("reaction_loss", "fk_contact_map_positive"), None, 0.001),
+            (("reaction_loss", "fk_contact_temperature_m"), None, 0.02),
+            (("reaction_loss", "fk_contact_threshold_m"), None, 0.15),
+            (("reaction_loss", "fk_contact_transition"), None, 0.003),
+            (("reaction_loss", "fk_contact_transition_beta"), None, 0.1),
+            (("reaction_loss", "fk_contact_vector"), None, 0.002),
+            (("reaction_loss", "fk_contact_vector_scale_m"), None, 0.05),
         ]
     else:
         raise ValueError(f"Unsupported training-contract mode: {mode!r}")
@@ -472,9 +572,16 @@ def _cluster_counts(
     uids: Iterable[str],
     prefix: str,
     threshold_cm: int,
+    *,
+    event_name: str = "close",
+    pairs_per_frame: int = 1,
+    frame_offset: int = 0,
+    event_channels: int = 1,
 ) -> np.ndarray:
+    if pairs_per_frame < 1 or event_channels < 1 or frame_offset < 0:
+        raise ValueError("Event denominator parameters must be positive")
     rows = []
-    stem = f"{prefix}close_{threshold_cm}cm_"
+    stem = f"{prefix}{event_name}_{threshold_cm}cm_"
     for uid in uids:
         values = np.zeros(len(COUNT_FIELDS), dtype=np.float64)
         for row in grouped[uid]:
@@ -493,8 +600,17 @@ def _cluster_counts(
                 raise ValueError(f"TP+FN does not equal target_positive for UID {uid}")
             if fp > target_negative:
                 raise ValueError(f"FP exceeds target_negative for UID {uid}")
-            if target_positive + target_negative != int(row["length"]):
-                raise ValueError(f"GT close-event denominator does not equal length for UID {uid}")
+            expected_denominator = (
+                max(int(row["length"]) - frame_offset, 0)
+                * pairs_per_frame
+                * event_channels
+            )
+            if target_positive + target_negative != expected_denominator:
+                raise ValueError(
+                    f"GT {event_name} denominator does not match the event map "
+                    f"for UID {uid}: {target_positive + target_negative} != "
+                    f"{expected_denominator}"
+                )
             values += np.asarray(local, dtype=np.float64)
         rows.append(values)
     return np.asarray(rows, dtype=np.float64)
@@ -523,8 +639,11 @@ def _count_metrics(counts: np.ndarray) -> np.ndarray:
     )
 
 
-def _summary(values: np.ndarray, point: np.ndarray) -> dict[str, dict[str, float]]:
-    names = ("precision", "recall", "f1", "false_close", "missed_close")
+def _summary(
+    values: np.ndarray,
+    point: np.ndarray,
+    names: tuple[str, str, str, str, str],
+) -> dict[str, dict[str, float]]:
     output: dict[str, dict[str, float]] = {}
     for index, name in enumerate(names):
         finite = values[np.isfinite(values[:, index]), index]
@@ -550,6 +669,8 @@ def _paired_count_comparison(
     rng: np.random.Generator,
     resamples: int,
     chunk_size: int = 512,
+    false_positive_name: str = "false_close",
+    false_negative_name: str = "missed_close",
 ) -> dict[str, Any]:
     if baseline_counts.shape != candidate_counts.shape:
         raise ValueError("Count arrays are not matched")
@@ -559,6 +680,13 @@ def _paired_count_comparison(
         raise ValueError("Matched arms have different target-positive/negative denominators")
     point_baseline = _count_metrics(baseline_counts.sum(axis=0))
     point_candidate = _count_metrics(candidate_counts.sum(axis=0))
+    metric_names = (
+        "precision",
+        "recall",
+        "f1",
+        false_positive_name,
+        false_negative_name,
+    )
     bootstrap = np.empty((resamples, 5), dtype=np.float64)
     cluster_count = baseline_counts.shape[0]
     for start in range(0, resamples, chunk_size):
@@ -573,19 +701,15 @@ def _paired_count_comparison(
             "candidate": dict(zip(COUNT_FIELDS, map(int, candidate_counts.sum(axis=0)))),
         },
         "baseline": dict(
-            zip(
-                ("precision", "recall", "f1", "false_close", "missed_close"),
-                map(float, point_baseline),
-            )
+            zip(metric_names, map(float, point_baseline))
         ),
         "candidate": dict(
-            zip(
-                ("precision", "recall", "f1", "false_close", "missed_close"),
-                map(float, point_candidate),
-            )
+            zip(metric_names, map(float, point_candidate))
         ),
         "candidate_minus_baseline": _summary(
-            bootstrap, point_candidate - point_baseline
+            bootstrap,
+            point_candidate - point_baseline,
+            metric_names,
         ),
     }
 
@@ -758,26 +882,51 @@ def main() -> None:
     parser.add_argument("--bootstrap_resamples", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=20260804)
     parser.add_argument(
+        "--expected_checkpoint_step",
+        type=int,
+        default=DEFAULT_CHECKPOINT_STEP,
+    )
+    parser.add_argument(
+        "--expected_split",
+        choices=tuple(EXPECTED_SPLIT_COUNTS),
+        default="val",
+    )
+    parser.add_argument(
         "--training_contract",
-        choices=("p_only_ablation", "reaction_v3_adaptive", "reaction_v4_layout"),
+        choices=(
+            "p_only_ablation",
+            "reaction_v3_adaptive",
+            "reaction_v4_layout",
+            "reaction_v5_1_full_contact",
+        ),
         default="p_only_ablation",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.bootstrap_resamples < 1000:
         parser.error("bootstrap_resamples must be at least 1000 for a 95% interval")
+    if args.expected_checkpoint_step <= 0:
+        parser.error("expected_checkpoint_step must be positive")
 
     baseline = _load(args.baseline)
     candidate = _load(args.candidate)
-    _validate_protocol(baseline, candidate)
+    _validate_protocol(
+        baseline,
+        candidate,
+        expected_checkpoint_step=args.expected_checkpoint_step,
+        expected_split=args.expected_split,
+    )
     prediction_args = (args.baseline_predictions, args.candidate_predictions)
     if (prediction_args[0] is None) != (prediction_args[1] is None):
         parser.error(
             "--baseline_predictions and --candidate_predictions must be provided together"
         )
-    if args.training_contract == "reaction_v4_layout" and prediction_args[0] is None:
+    if (
+        args.training_contract in {"reaction_v4_layout", "reaction_v5_1_full_contact"}
+        and prediction_args[0] is None
+    ):
         parser.error(
-            "reaction_v4_layout comparison requires both prediction directories so "
+            f"{args.training_contract} comparison requires both prediction directories so "
             "new phase metrics are recomputed under one implementation"
         )
     if prediction_args[0] is not None and prediction_args[1] is not None:
@@ -787,6 +936,7 @@ def main() -> None:
         baseline,
         candidate,
         mode=args.training_contract,
+        expected_checkpoint_step=args.expected_checkpoint_step,
     )
     baseline_rows = _rows_by_uid(baseline, args.variant)
     candidate_rows = _rows_by_uid(candidate, args.variant)
@@ -805,6 +955,51 @@ def main() -> None:
                 rng=rng,
                 resamples=args.bootstrap_resamples,
             )
+
+    pair_contact_metrics = _paired_count_comparison(
+        _cluster_counts(
+            baseline_rows,
+            uids,
+            "fk_pair_",
+            15,
+            pairs_per_frame=22 * 22,
+        ),
+        _cluster_counts(
+            candidate_rows,
+            uids,
+            "fk_pair_",
+            15,
+            pairs_per_frame=22 * 22,
+        ),
+        rng=rng,
+        resamples=args.bootstrap_resamples,
+    )
+    pair_transition_metrics = _paired_count_comparison(
+        _cluster_counts(
+            baseline_rows,
+            uids,
+            "fk_pair_",
+            15,
+            event_name="transition",
+            pairs_per_frame=22 * 22,
+            frame_offset=1,
+            event_channels=2,
+        ),
+        _cluster_counts(
+            candidate_rows,
+            uids,
+            "fk_pair_",
+            15,
+            event_name="transition",
+            pairs_per_frame=22 * 22,
+            frame_offset=1,
+            event_channels=2,
+        ),
+        rng=rng,
+        resamples=args.bootstrap_resamples,
+        false_positive_name="false_transition",
+        false_negative_name="missed_transition",
+    )
 
     mean_metrics = {}
     for metric in MEAN_METRICS:
@@ -840,6 +1035,29 @@ def main() -> None:
             resamples=args.bootstrap_resamples,
         )
 
+    contact_lifecycle_pooled_metrics = {}
+    for metric, (numerator_field, denominator_field) in (
+        CONTACT_LIFECYCLE_POOLED_METRICS.items()
+    ):
+        left = _cluster_ratio_components(
+            baseline_rows,
+            uids,
+            numerator_field,
+            denominator_field,
+        )
+        right = _cluster_ratio_components(
+            candidate_rows,
+            uids,
+            numerator_field,
+            denominator_field,
+        )
+        contact_lifecycle_pooled_metrics[metric] = _paired_ratio_comparison(
+            left,
+            right,
+            rng=rng,
+            resamples=args.bootstrap_resamples,
+        )
+
     result = {
         "format": "hy273_reaction_matched_uid_cluster_comparison_v2",
         "baseline": {"label": args.baseline_label, "path": str(args.baseline.resolve())},
@@ -847,6 +1065,7 @@ def main() -> None:
         "training_contract": training_contract,
         "variant": args.variant,
         "split": baseline["split"],
+        "checkpoint_next_global_step": args.expected_checkpoint_step,
         "uid_clusters": len(uids),
         "rows": sum(len(baseline_rows[uid]) for uid in uids),
         "bootstrap": {
@@ -857,6 +1076,11 @@ def main() -> None:
             "numpy_version": np.__version__,
         },
         "close_metrics": close_metrics,
+        "contact_lifecycle_metrics": {
+            "fk_pair_close_15cm": pair_contact_metrics,
+            "fk_pair_transition_15cm": pair_transition_metrics,
+            "pooled_over_gt_contact_pairs": contact_lifecycle_pooled_metrics,
+        },
         "mean_metrics": mean_metrics,
         "layout_phase_metrics": {
             "per_clip_means": {

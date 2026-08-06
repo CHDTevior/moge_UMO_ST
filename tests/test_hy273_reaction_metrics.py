@@ -471,6 +471,9 @@ def test_reaction_matched_metrics_can_be_recomputed_from_saved_predictions(
                     "dataset_index": 0,
                     "caption_index": 0,
                     "length": length,
+                    "reactor_fk_mpjpe_cm": 0.0,
+                    "reactor_root_error_cm": 0.0,
+                    "fk_relation_distance_mae_cm": 0.0,
                 }
             ]
             for variant in REQUIRED_VARIANTS
