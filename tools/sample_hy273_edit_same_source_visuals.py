@@ -18,14 +18,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.raw_motion.hy273_slices import CONT_DIM
-from sample_hy273_multitask import normalizer_from_checkpoint, sample_hy273_multitask_ode
+from sample_hy273_multitask import (
+    create_model_from_checkpoint,
+    normalizer_from_checkpoint,
+    sample_hy273_multitask_ode,
+)
 from tools.eval_hy273_edit_same_source_fixed_t import (
     DEFAULT_MANIFEST,
     load_same_source_rows,
     materialize_groups,
 )
 from tools.overfit_hy273_edit_instruction_pairs import collate_groups
-from train_hy273_multitask import create_model_from_checkpoint
 
 
 DEFAULT_GROUPS = (

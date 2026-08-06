@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 
 from data.hy273_interaction_dataset import apply_shared_interaction_gauge
 from data.hy273_unified_actor_batcher import PiecewiseTaskScheduler
@@ -18,7 +19,9 @@ from data.hy273_multitask_scheduler import (
     hml_capability_from_draw,
 )
 from models.raw_motion.hy273_actor_exchange import BidirectionalActorExchange
+from models.raw_motion.flow_schedule import sample_timesteps_with_low_t_mixture
 from models.raw_motion.hy273_interaction_losses import (
+    HY273InteractionLossBundle,
     HY273InteractionLossWeights,
     compute_hy273_interaction_loss,
 )
@@ -30,7 +33,7 @@ from models.raw_motion.hy273_multitask_condition import (
     TrainStream,
     make_absent_condition,
 )
-from models.raw_motion.hy273_normalizer import HY273Normalizer
+from models.raw_motion.hy273_normalizer import HY273Normalizer, apply_yaw_rotation
 from models.raw_motion.hy273_unified_edit_losses import (
     UnifiedEditLossWeights,
     compute_unified_edit_loss,
@@ -58,9 +61,12 @@ from train_hy273_unified_actor import (
     FULLTEXT_STAGE_A_CONTRACT,
     FULLTEXT_STAGE_B_CONTRACT,
     FULLTEXT_STAGE_B_CONTINUE_CONTRACT,
+    FULLTEXT_REACTION_V2_STAGE_B_CONTRACT,
+    MetricWindow,
     _masked_gradient_rms,
     globalize_ratio_terms,
     load_config,
+    make_interaction_weights,
     validate_config,
     validate_fulltext_phase_contract,
     validate_resume_config,
@@ -332,6 +338,761 @@ def test_interaction_relation_loss_gt_zero_and_flow_time_gate() -> None:
     assert float(partly_active.active_scene_fraction) == 0.5
 
 
+def _reaction_v2_test_weights(**overrides: object) -> HY273InteractionLossWeights:
+    values: dict[str, object] = {
+        "relative_root": 0.0,
+        "relative_heading": 0.0,
+        "joint_distance": 1.0,
+        "close_joint_vector": 0.0,
+        "relative_root_radius": 1.0,
+        "relative_root_bearing": 1.0,
+        "partner_facing": 1.0,
+        "soft_proximity": 1.0,
+        "false_close": 1.0,
+        "distance_include_predicted_near": True,
+        "coarse_min_flow_t": 0.0,
+        "fine_min_flow_t": 0.55,
+    }
+    values.update(overrides)
+    return HY273InteractionLossWeights(**values)
+
+
+def _reaction_v4_layout_weights(
+    **overrides: object,
+) -> HY273InteractionLossWeights:
+    values: dict[str, object] = {
+        "relative_root": 1.0,
+        "relative_heading": 1.0,
+        "joint_distance": 0.0,
+        "close_joint_vector": 0.0,
+        "relative_root_radius": 0.0,
+        "relative_root_bearing": 0.0,
+        "partner_facing": 0.0,
+        "soft_proximity": 0.0,
+        "false_close": 0.0,
+        "root_scale_m": 0.25,
+        "heading_beta": 0.10,
+        "coarse_min_flow_t": 0.0,
+        "fine_min_flow_t": 0.20,
+    }
+    values.update(overrides)
+    return HY273InteractionLossWeights(**values)
+
+
+def _reaction_v5_event_weights(
+    **overrides: object,
+) -> HY273InteractionLossWeights:
+    values: dict[str, object] = {
+        "relative_root": 0.0,
+        "relative_heading": 0.0,
+        "joint_distance": 0.0,
+        "close_joint_vector": 0.0,
+        "relative_root_radius": 0.0,
+        "relative_root_bearing": 0.0,
+        "partner_facing": 0.0,
+        "soft_proximity": 0.0,
+        "false_close": 0.0,
+        "scene_proximity": 0.0,
+        "precontact_false_close": 0.0,
+        "first_contact_cdf": 0.0,
+        "layout_contact_threshold_m": 0.20,
+        "proximity_temperature_m": 0.03,
+        "precontact_directional_strength": 0.25,
+        "coarse_min_flow_t": 0.0,
+        "fine_min_flow_t": 0.20,
+    }
+    values.update(overrides)
+    return HY273InteractionLossWeights(**values)
+
+
+def test_reaction_v4_layout_is_signed_3d_and_shared_yaw_invariant() -> None:
+    target = torch.zeros(1, 2, 3, DIM_HY273)
+    prediction = target.clone()
+    target[:, 0, :, HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[:, 0, :, HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, HEADING_SLICE] = torch.tensor([-1.0, 0.0])
+    prediction[:, 1, :, HEADING_SLICE] = torch.tensor([0.0, 1.0])
+    target[:, 1, :, ROOT_SLICE] = torch.tensor([1.0, 0.9, 0.25])
+    prediction[:, 1, :, ROOT_SLICE] = torch.tensor([-0.6, 1.1, 0.40])
+    valid = torch.ones(1, 2, 3, dtype=torch.bool)
+    weights = _reaction_v4_layout_weights()
+
+    before = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.05]),
+        weights=weights,
+    )
+    assert float(before.terms["interaction_relative_root"].raw) > 0.0
+    assert float(before.terms["interaction_relative_heading"].raw) > 0.0
+
+    angle = torch.tensor(1.1)
+    after = compute_hy273_interaction_loss(
+        prediction_physical=apply_yaw_rotation(prediction, angle),
+        target_physical=apply_yaw_rotation(target, angle),
+        actor_valid=valid,
+        timesteps=torch.tensor([0.05]),
+        weights=weights,
+    )
+    for name in (
+        "interaction_relative_root",
+        "interaction_relative_heading",
+    ):
+        torch.testing.assert_close(
+            before.terms[name].raw,
+            after.terms[name].raw,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    vertical_only = target.clone()
+    vertical_only[:, 1, :, ROOT_SLICE.start + 1] += 0.2
+    vertical = compute_hy273_interaction_loss(
+        prediction_physical=vertical_only,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.05]),
+        weights=_reaction_v4_layout_weights(relative_heading=0.0),
+    )
+    assert float(vertical.terms["interaction_relative_root"].raw) > 0.0
+
+
+def _reaction_v4_phase_bundle(
+    *,
+    error_frame: int | None,
+    target_root_x: list[float],
+) -> HY273InteractionLossBundle:
+    frames = len(target_root_x)
+    target = torch.zeros(1, 2, frames, DIM_HY273)
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = torch.tensor(target_root_x)
+    prediction = target.clone()
+    if error_frame is not None:
+        prediction[:, 1, error_frame, ROOT_SLICE.start] += 0.10
+    return compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, frames, dtype=torch.bool),
+        timesteps=torch.tensor([0.05]),
+        weights=_reaction_v4_layout_weights(
+            relative_heading=0.0,
+            layout_initial_frames=1,
+            layout_initial_multiplier=3.0,
+            layout_precontact_multiplier=2.0,
+            layout_contact_threshold_m=0.20,
+        ),
+    )
+
+
+def test_reaction_v4_layout_phase_weights_initial_precontact_and_postcontact() -> None:
+    # GT first becomes close at frame 2: phase weights are [3, 2, 1, 1].
+    initial = _reaction_v4_phase_bundle(
+        error_frame=0, target_root_x=[1.0, 1.0, 0.0, 0.0]
+    )
+    precontact = _reaction_v4_phase_bundle(
+        error_frame=1, target_root_x=[1.0, 1.0, 0.0, 0.0]
+    )
+    postcontact = _reaction_v4_phase_bundle(
+        error_frame=2, target_root_x=[1.0, 1.0, 0.0, 0.0]
+    )
+    initial_raw = initial.terms["interaction_relative_root"].raw
+    precontact_raw = precontact.terms["interaction_relative_root"].raw
+    postcontact_raw = postcontact.terms["interaction_relative_root"].raw
+    torch.testing.assert_close(initial_raw, 3.0 * postcontact_raw)
+    torch.testing.assert_close(precontact_raw, 2.0 * postcontact_raw)
+    phase_numerator, phase_denominator = initial.diagnostic_ratios[
+        "layout_phase_weight_mean"
+    ]
+    assert float(phase_numerator / phase_denominator) == pytest.approx(1.75)
+
+
+def test_reaction_v4_layout_phase_handles_no_contact_and_frame0_contact() -> None:
+    no_contact = _reaction_v4_phase_bundle(
+        error_frame=None, target_root_x=[1.0, 1.0, 1.0, 1.0]
+    )
+    no_contact_num, no_contact_den = no_contact.diagnostic_ratios[
+        "layout_phase_weight_mean"
+    ]
+    assert float(no_contact_num / no_contact_den) == pytest.approx(2.25)
+
+    frame0_contact = _reaction_v4_phase_bundle(
+        error_frame=None, target_root_x=[0.0, 0.0, 0.0, 0.0]
+    )
+    frame0_num, frame0_den = frame0_contact.diagnostic_ratios[
+        "layout_phase_weight_mean"
+    ]
+    assert float(frame0_num / frame0_den) == pytest.approx(1.5)
+
+
+def _reaction_v5_phase_bundle(
+    *,
+    error_frame: int,
+    term: str,
+) -> HY273InteractionLossBundle:
+    target = torch.zeros(1, 2, 4, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = torch.tensor([1.0, 1.0, 0.15, 0.15])
+    prediction[:, 1, :, ROOT_SLICE.start] = target[:, 1, :, ROOT_SLICE.start]
+    weights: dict[str, object] = {
+        "layout_initial_frames": 1,
+        "layout_initial_multiplier": 4.0,
+        "layout_precontact_multiplier": 3.0,
+    }
+    if term == "bearing":
+        prediction[:, 1, error_frame, ROOT_SLICE.start] = 0.0
+        prediction[:, 1, error_frame, ROOT_SLICE.start + 2] = target[
+            :, 1, error_frame, ROOT_SLICE.start
+        ]
+        weights["relative_root_bearing"] = 1.0
+    elif term == "facing":
+        prediction[:, 1, error_frame, HEADING_SLICE] = torch.tensor([0.0, 1.0])
+        weights["partner_facing"] = 1.0
+    elif term == "radius":
+        prediction[:, 1, error_frame, ROOT_SLICE.start] += 0.10
+        weights["relative_root_radius"] = 1.0
+    else:
+        raise AssertionError(term)
+    return compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+        timesteps=torch.tensor([0.05]),
+        weights=_reaction_v5_event_weights(**weights),
+    )
+
+
+@pytest.mark.parametrize(
+    ("term", "term_name"),
+    [
+        ("radius", "interaction_relative_root_radius"),
+        ("bearing", "interaction_relative_root_bearing"),
+        ("facing", "interaction_partner_facing"),
+    ],
+)
+def test_reaction_v5_phase_weights_true_layout_terms(
+    term: str,
+    term_name: str,
+) -> None:
+    initial = _reaction_v5_phase_bundle(error_frame=0, term=term)
+    precontact = _reaction_v5_phase_bundle(error_frame=1, term=term)
+    postcontact = _reaction_v5_phase_bundle(error_frame=2, term=term)
+    torch.testing.assert_close(
+        initial.terms[term_name].raw,
+        4.0 * postcontact.terms[term_name].raw,
+    )
+    torch.testing.assert_close(
+        precontact.terms[term_name].raw,
+        3.0 * postcontact.terms[term_name].raw,
+    )
+
+
+def _reaction_v5_event_bundle(
+    *,
+    target_root_x: list[float],
+    prediction_root_x: list[float],
+    timestep: float = 0.05,
+    requires_grad: bool = False,
+) -> tuple[torch.Tensor, HY273InteractionLossBundle]:
+    if len(target_root_x) != len(prediction_root_x):
+        raise AssertionError("target and prediction lengths differ")
+    frames = len(target_root_x)
+    target = torch.zeros(1, 2, frames, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = torch.tensor(target_root_x)
+    prediction[:, 1, :, ROOT_SLICE.start] = torch.tensor(prediction_root_x)
+    prediction.requires_grad_(requires_grad)
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, frames, dtype=torch.bool),
+        timesteps=torch.tensor([timestep]),
+        weights=_reaction_v5_event_weights(
+            scene_proximity=1.0,
+            precontact_false_close=1.0,
+            first_contact_cdf=1.0,
+        ),
+    )
+    return prediction, bundle
+
+
+def test_reaction_v5_penalizes_benchmark_range_precontact_false_close() -> None:
+    _, correct = _reaction_v5_event_bundle(
+        target_root_x=[1.0], prediction_root_x=[1.0]
+    )
+    _, false_close_15cm = _reaction_v5_event_bundle(
+        target_root_x=[1.0], prediction_root_x=[0.15]
+    )
+    _, safe_25cm = _reaction_v5_event_bundle(
+        target_root_x=[1.0], prediction_root_x=[0.25]
+    )
+    term = "interaction_precontact_false_close"
+    assert float(correct.terms[term].raw) == 0.0
+    assert float(false_close_15cm.terms[term].raw) > 0.0
+    assert float(safe_25cm.terms[term].raw) == 0.0
+    assert float(false_close_15cm.terms["interaction_false_close"].raw) == 0.0
+
+
+def test_reaction_v5_event_state_and_first_contact_timing_are_low_t_active() -> None:
+    _, exact = _reaction_v5_event_bundle(
+        target_root_x=[1.0, 1.0, 0.0, 0.0],
+        prediction_root_x=[1.0, 1.0, 0.0, 0.0],
+        timestep=0.05,
+    )
+    _, early = _reaction_v5_event_bundle(
+        target_root_x=[1.0, 1.0, 0.0, 0.0],
+        prediction_root_x=[1.0, 0.0, 0.0, 0.0],
+        timestep=0.05,
+    )
+    assert float(
+        early.terms["interaction_scene_proximity_negative"].raw
+    ) > float(exact.terms["interaction_scene_proximity_negative"].raw)
+    assert float(early.terms["interaction_first_contact_cdf"].raw) > float(
+        exact.terms["interaction_first_contact_cdf"].raw
+    )
+    assert float(early.terms["interaction_joint_distance"].raw) == 0.0
+
+
+def test_reaction_v5_scene_kl_is_zero_at_target_and_locally_well_directed() -> None:
+    exact_prediction, exact = _reaction_v5_event_bundle(
+        target_root_x=[0.21],
+        prediction_root_x=[0.21],
+        requires_grad=True,
+    )
+    term_name = "interaction_scene_proximity_negative"
+    assert float(exact.terms[term_name].raw) == 0.0
+    exact.terms[term_name].weighted.backward()
+    # The logits-form KL is evaluated in float64, but its mathematically zero
+    # derivative can retain roundoff at the 1e-15 scale after autograd.
+    assert float(exact_prediction.grad.abs().max()) < 1e-12
+
+    farther_prediction, farther = _reaction_v5_event_bundle(
+        target_root_x=[0.21],
+        prediction_root_x=[0.211],
+        requires_grad=True,
+    )
+    farther.terms[term_name].weighted.backward()
+    gradient = farther_prediction.grad[0, 1, 0, ROOT_SLICE.start]
+    assert float(farther.terms[term_name].raw) > 0.0
+    assert float(gradient) > 0.0
+
+
+def test_reaction_v5_first_contact_gradient_ignores_later_contact_duration() -> None:
+    target_root_x = [1.0, 1.0, 1.0, 1.0, 0.10, 0.10]
+    prediction_once, once = _reaction_v5_event_bundle(
+        target_root_x=target_root_x,
+        prediction_root_x=[1.0, 0.10, 1.0, 1.0, 1.0, 1.0],
+        requires_grad=True,
+    )
+    prediction_persistent, persistent = _reaction_v5_event_bundle(
+        target_root_x=target_root_x,
+        prediction_root_x=[1.0, 0.10, 0.10, 0.10, 1.0, 1.0],
+        requires_grad=True,
+    )
+    term_name = "interaction_first_contact_cdf"
+    torch.testing.assert_close(
+        once.terms[term_name].raw,
+        persistent.terms[term_name].raw,
+    )
+    once.terms[term_name].weighted.backward()
+    persistent.terms[term_name].weighted.backward()
+    once_root_gradient = prediction_once.grad[0, 1, :, ROOT_SLICE.start]
+    persistent_root_gradient = prediction_persistent.grad[
+        0, 1, :, ROOT_SLICE.start
+    ]
+    torch.testing.assert_close(
+        once_root_gradient.sum(),
+        persistent_root_gradient.sum(),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert float(once_root_gradient.abs().sum()) > 0.0
+
+
+def test_reaction_v5_exact_overlap_has_directional_separation_gradient() -> None:
+    prediction, bundle = _reaction_v5_event_bundle(
+        target_root_x=[1.0],
+        prediction_root_x=[0.0],
+        requires_grad=True,
+    )
+    bundle.terms["interaction_precontact_false_close"].weighted.backward()
+    root_gradient = prediction.grad[0, 1, 0, ROOT_SLICE.start]
+    assert torch.isfinite(root_gradient)
+    assert float(root_gradient.abs()) > 0.0
+    assert float(prediction.grad[0, 1, 0, JOINT_POS_SLICE].abs().max()) == 0.0
+
+
+def test_reaction_low_t_mixture_is_deterministic_and_material() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(20260805)
+    timesteps, selected = sample_timesteps_with_low_t_mixture(
+        20_000,
+        torch.device("cpu"),
+        schedule="logit_normal",
+        p_mean=-0.8,
+        p_std=0.8,
+        low_t_fraction=0.30,
+        low_t_max=0.15,
+        generator=generator,
+    )
+    assert float(selected.float().mean()) == pytest.approx(0.30, abs=0.015)
+    assert bool((timesteps[selected] <= 0.15).all())
+    assert float((timesteps <= 0.03125).float().mean()) > 0.05
+
+    replay_generator = torch.Generator(device="cpu").manual_seed(20260805)
+    replay_timesteps, replay_selected = sample_timesteps_with_low_t_mixture(
+        20_000,
+        torch.device("cpu"),
+        schedule="logit_normal",
+        p_mean=-0.8,
+        p_std=0.8,
+        low_t_fraction=0.30,
+        low_t_max=0.15,
+        generator=replay_generator,
+    )
+    assert torch.equal(timesteps, replay_timesteps)
+    assert torch.equal(selected, replay_selected)
+
+
+def _reaction_p_only_bundle(
+    *,
+    source_x: float = 0.0,
+    target_x: float = 0.10,
+    prediction_x: float = 0.20,
+    timestep: float = 0.8,
+) -> tuple[torch.Tensor, HY273InteractionLossBundle]:
+    target = torch.zeros(1, 2, 1, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 0, :, ROOT_SLICE.start] = source_x
+    prediction[:, 0, :, ROOT_SLICE.start] = source_x
+    target[:, 1, :, ROOT_SLICE.start] = target_x
+    prediction[:, 1, :, ROOT_SLICE.start] = prediction_x
+    prediction.requires_grad_()
+    weights = _reaction_v2_test_weights(
+        joint_distance=0.0,
+        close_joint_vector=0.01,
+        relative_root_radius=0.0,
+        relative_root_bearing=0.0,
+        partner_facing=0.0,
+        soft_proximity=0.0,
+        false_close=0.0,
+    )
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 1, dtype=torch.bool),
+        timesteps=torch.tensor([timestep]),
+        weights=weights,
+    )
+    return prediction, bundle
+
+
+def test_reaction_p_only_is_gt_close_reconstruction_with_fine_gate() -> None:
+    prediction, active = _reaction_p_only_bundle()
+    term = active.terms["interaction_close_joint_vector"]
+    assert float(term.raw) > 0.0
+    torch.testing.assert_close(term.weighted, term.raw * 0.01)
+    assert float(active.close_mask_fraction) == 1.0
+    active.total.backward()
+    assert prediction.grad is not None
+    reactor_gradient = prediction.grad[0, 1, 0, ROOT_SLICE.start]
+    assert float(reactor_gradient) > 0.0
+
+    _, shifted_source = _reaction_p_only_bundle(source_x=0.05)
+    torch.testing.assert_close(
+        term.raw,
+        shifted_source.terms["interaction_close_joint_vector"].raw,
+    )
+
+    _, gated = _reaction_p_only_bundle(timestep=0.2)
+    assert float(gated.total) == 0.0
+    assert float(gated.close_mask_fraction) == 0.0
+
+    _, gt_far = _reaction_p_only_bundle(target_x=0.25, prediction_x=0.35)
+    assert float(gt_far.total) == 0.0
+    assert float(gt_far.close_mask_fraction) == 0.0
+
+
+def test_reaction_p_only_has_constant_tail_gradient_and_quadratic_yaw_invariance() -> None:
+    tail_gradients = []
+    for prediction_x in (0.20, 0.30):
+        prediction, bundle = _reaction_p_only_bundle(prediction_x=prediction_x)
+        bundle.total.backward()
+        assert prediction.grad is not None
+        tail_gradients.append(
+            prediction.grad[0, 1, 0, ROOT_SLICE.start].detach().clone()
+        )
+    torch.testing.assert_close(tail_gradients[0], tail_gradients[1])
+
+    target = torch.zeros(1, 2, 1, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = 0.10
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.12
+    weights = _reaction_v2_test_weights(
+        joint_distance=0.0,
+        close_joint_vector=0.01,
+        relative_root_radius=0.0,
+        relative_root_bearing=0.0,
+        partner_facing=0.0,
+        soft_proximity=0.0,
+        false_close=0.0,
+    )
+    kwargs = {
+        "actor_valid": torch.ones(1, 2, 1, dtype=torch.bool),
+        "timesteps": torch.tensor([0.8]),
+        "weights": weights,
+    }
+    before = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        **kwargs,
+    )
+    angle = torch.tensor(1.1)
+    after = compute_hy273_interaction_loss(
+        prediction_physical=apply_yaw_rotation(prediction, angle),
+        target_physical=apply_yaw_rotation(target, angle),
+        **kwargs,
+    )
+    torch.testing.assert_close(
+        before.terms["interaction_close_joint_vector"].raw,
+        after.terms["interaction_close_joint_vector"].raw,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_reaction_v2_coarse_bearing_is_active_before_fine_geometry() -> None:
+    target = torch.zeros(1, 2, 4, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = 1.0
+    prediction[:, 1, :, ROOT_SLICE.start + 2] = 1.0
+    valid = torch.ones(1, 2, 4, dtype=torch.bool)
+
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.30]),
+        weights=_reaction_v2_test_weights(),
+    )
+    assert float(bundle.coarse_active_scene_fraction) == 1.0
+    assert float(bundle.fine_active_scene_fraction) == 0.0
+    assert float(bundle.terms["interaction_relative_root_radius"].raw) == 0.0
+    assert float(bundle.terms["interaction_relative_root_bearing"].raw) > 0.0
+    assert float(bundle.terms["interaction_joint_distance"].raw) == 0.0
+
+
+def test_reaction_v2_descriptors_are_invariant_to_shared_world_yaw() -> None:
+    target = torch.zeros(1, 2, 3, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = 1.0
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.7
+    prediction[:, 1, :, ROOT_SLICE.start + 2] = 0.4
+    valid = torch.ones(1, 2, 3, dtype=torch.bool)
+    weights = _reaction_v2_test_weights()
+
+    before = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    angle = torch.tensor(1.1)
+    after = compute_hy273_interaction_loss(
+        prediction_physical=apply_yaw_rotation(prediction, angle),
+        target_physical=apply_yaw_rotation(target, angle),
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    for name in (
+        "interaction_relative_root_radius",
+        "interaction_relative_root_bearing",
+        "interaction_partner_facing",
+        "interaction_joint_distance",
+    ):
+        torch.testing.assert_close(
+            before.terms[name].raw,
+            after.terms[name].raw,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+def test_reaction_v2_false_close_does_not_penalize_true_contact() -> None:
+    target_far = torch.zeros(1, 2, 2, DIM_HY273)
+    prediction_false_close = target_far.clone()
+    target_far[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction_false_close[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target_far[:, 1, :, ROOT_SLICE.start] = 1.0
+    prediction_false_close.requires_grad_()
+    valid = torch.ones(1, 2, 2, dtype=torch.bool)
+    weights = _reaction_v2_test_weights(
+        relative_root_radius=0.0,
+        relative_root_bearing=0.0,
+        partner_facing=0.0,
+        joint_distance=0.0,
+        soft_proximity=0.0,
+    )
+
+    false_close = compute_hy273_interaction_loss(
+        prediction_physical=prediction_false_close,
+        target_physical=target_far,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    assert float(false_close.terms["interaction_false_close"].raw) > 0.0
+    false_close.total.backward()
+    assert prediction_false_close.grad is not None
+    assert float(prediction_false_close.grad.norm()) > 0.0
+    assert (
+        float(prediction_false_close.grad[0, 1, 0, ROOT_SLICE.start]) < 0.0
+    )
+
+    target_contact = prediction_false_close.detach().clone()
+    true_contact = compute_hy273_interaction_loss(
+        prediction_physical=target_contact,
+        target_physical=target_contact,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    assert float(true_contact.terms["interaction_false_close"].raw) == 0.0
+
+
+def test_reaction_adaptive_distance_matches_inverse_gt_weighted_huber() -> None:
+    target = torch.zeros(1, 2, 1, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = 1.5
+    # Keep a nonzero separation: cdist has zero directional gradient at exact
+    # overlap, which is handled by the separate directional false-close term.
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.2
+    prediction.requires_grad_()
+    weights = _reaction_v2_test_weights(
+        relative_root_radius=0.0,
+        relative_root_bearing=0.0,
+        partner_facing=0.0,
+        joint_distance=1.0,
+        joint_distance_mode="adaptive_gt_inverse",
+        adaptive_distance_eps_m=0.10,
+        adaptive_distance_beta_m=0.05,
+        close_joint_vector=0.0,
+        soft_proximity=0.0,
+        false_close=0.0,
+        fine_min_flow_t=0.20,
+    )
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 1, dtype=torch.bool),
+        timesteps=torch.tensor([0.30]),
+        weights=weights,
+    )
+    with torch.no_grad():
+        pred_joints = reconstruct_global_joints_from_features(prediction.float())
+        target_joints = reconstruct_global_joints_from_features(target.float())
+        pred_distance = torch.cdist(pred_joints[:, 0, 0], pred_joints[:, 1, 0])
+        target_distance = torch.cdist(
+            target_joints[:, 0, 0], target_joints[:, 1, 0]
+        )
+        adaptive_weight = 1.0 / (target_distance + 0.10)
+        values = F.smooth_l1_loss(
+            pred_distance,
+            target_distance,
+            reduction="none",
+            beta=0.05,
+        )
+        expected = (values * adaptive_weight).sum() / adaptive_weight.sum()
+    torch.testing.assert_close(
+        bundle.terms["interaction_joint_distance"].raw, expected
+    )
+    assert float(bundle.distance_mask_fraction) == 1.0
+    bundle.total.backward()
+    assert prediction.grad is not None
+    assert float(prediction.grad.norm()) > 0.0
+
+
+def test_reaction_close_vector_tail_is_invariant_to_shared_world_yaw() -> None:
+    target = torch.zeros(1, 2, 1, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    target[:, 1, :, ROOT_SLICE.start] = 0.05
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.20
+    weights = _reaction_v2_test_weights(
+        relative_root_radius=0.0,
+        relative_root_bearing=0.0,
+        partner_facing=0.0,
+        joint_distance=0.0,
+        close_joint_vector=1.0,
+        soft_proximity=0.0,
+        false_close=0.0,
+    )
+    kwargs = {
+        "actor_valid": torch.ones(1, 2, 1, dtype=torch.bool),
+        "timesteps": torch.tensor([0.8]),
+        "weights": weights,
+    }
+    before = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        **kwargs,
+    )
+    angle = torch.tensor(0.75)
+    after = compute_hy273_interaction_loss(
+        prediction_physical=apply_yaw_rotation(prediction, angle),
+        target_physical=apply_yaw_rotation(target, angle),
+        **kwargs,
+    )
+    torch.testing.assert_close(
+        before.terms["interaction_close_joint_vector"].raw,
+        after.terms["interaction_close_joint_vector"].raw,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_reaction_v2_diagnostic_ratios_keep_global_counts() -> None:
+    target = torch.zeros(2, 2, 2, DIM_HY273)
+    prediction = target.clone()
+    target[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    prediction[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    valid = torch.ones(2, 2, 2, dtype=torch.bool)
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8, 0.2]),
+        weights=_reaction_v2_test_weights(),
+    )
+    numerator, denominator = bundle.diagnostic_ratios[
+        "fine_active_scene_fraction"
+    ]
+    assert float(numerator) == 1.0
+    assert float(denominator) == 2.0
+
+    window = MetricWindow(torch.device("cpu"))
+    window.add_ratio("reaction/fine_active_scene_fraction", 0.0, 1.0)
+    window.add_ratio("reaction/fine_active_scene_fraction", 1.0, 1.0)
+    result = window.flush(elapsed=1.0, world_size=1)
+    assert result["reaction/fine_active_scene_fraction/raw"] == 0.5
+
+
 def test_piecewise_task_schedule_exact_mix_and_resume() -> None:
     segments = [
         {"start": 0, "end": 100000, "t2m": 100, "edit": 0, "interaction": 0},
@@ -562,6 +1323,106 @@ def test_resume_config_allows_only_the_declared_same_mix_extension() -> None:
         )
 
 
+def test_reaction_v2_resume_transition_changes_only_reaction_loss() -> None:
+    checkpoint_config = {
+        "data": {"paired_task": "reaction"},
+        "model": {"hidden_dim": 1024},
+        "reaction_loss": {"joint_distance": 0.01, "min_flow_t": 0.20},
+    }
+    current_config = {
+        **checkpoint_config,
+        "reaction_loss": {
+            "joint_distance": 0.01,
+            "coarse_min_flow_t": 0.0,
+            "fine_min_flow_t": 0.55,
+        },
+    }
+    validate_resume_config(
+        checkpoint_config,
+        current_config,
+        allow_reaction_v2_transition_at_step=100_000,
+    )
+    changed_model = {**current_config, "model": {"hidden_dim": 2048}}
+    with pytest.raises(ValueError, match="config changed"):
+        validate_resume_config(
+            checkpoint_config,
+            changed_model,
+            allow_reaction_v2_transition_at_step=100_000,
+        )
+
+
+def test_reaction_v4_real_configs_change_only_reaction_loss() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    parent_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v1.yaml"
+    )
+    v4_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v4_layout.yaml"
+    )
+    validate_resume_config(
+        parent_config,
+        v4_config,
+        allow_reaction_v2_transition_at_step=100_000,
+    )
+
+    changed_output_dir = {
+        **v4_config,
+        "training": {
+            **v4_config["training"],
+            "output_dir": "/tmp/reaction-v4-different-output",
+        },
+    }
+    with pytest.raises(ValueError, match="config changed"):
+        validate_resume_config(
+            parent_config,
+            changed_output_dir,
+            allow_reaction_v2_transition_at_step=100_000,
+        )
+
+
+def test_reaction_v5_real_config_changes_only_reaction_loss() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    parent_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v1.yaml"
+    )
+    v5_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v5_event_layout.yaml"
+    )
+    validate_config(v5_config)
+    validate_resume_config(
+        parent_config,
+        v5_config,
+        allow_reaction_v2_transition_at_step=100_000,
+    )
+    weights = make_interaction_weights(v5_config)
+    assert weights.relative_root == 0.0
+    assert weights.relative_heading == 0.0
+    assert weights.relative_root_bearing == pytest.approx(0.05)
+    assert weights.partner_facing == pytest.approx(0.04)
+    assert weights.scene_proximity == pytest.approx(0.008)
+    assert weights.precontact_false_close == pytest.approx(0.008)
+    assert weights.first_contact_cdf == pytest.approx(0.003)
+    assert v5_config["reaction_loss"]["low_t_fraction"] == pytest.approx(0.30)
+    assert v5_config["reaction_loss"]["low_t_max"] == pytest.approx(0.15)
+
+
+def test_reaction_v4_same_mix_extension_to_250k_changes_only_horizon() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    base_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v4_layout.yaml"
+    )
+    extended_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v4_layout_continue250k.yaml"
+    )
+    validate_config(extended_config)
+    validate_resume_config(
+        base_config,
+        extended_config,
+        allow_same_mix_extension_at_step=200_000,
+    )
+
+
 def test_resume_requires_the_same_scientific_run() -> None:
     validate_resume_run_name("fulltext_scratch_001", "fulltext_scratch_001")
     with pytest.raises(ValueError, match="different run"):
@@ -596,6 +1457,13 @@ def test_fulltext_phase_contract_is_scratch_then_exact_same_run_resume() -> None
         run_dir_exists=True,
         declared_stop_step=200_000,
         global_step=150_000,
+    )
+    validate_fulltext_phase_contract(
+        FULLTEXT_REACTION_V2_STAGE_B_CONTRACT,
+        has_resume=True,
+        run_dir_exists=False,
+        declared_stop_step=150_000,
+        global_step=100_000,
     )
     validate_fulltext_phase_contract(
         FULLTEXT_STAGE_B_CONTINUE_CONTRACT,

@@ -959,6 +959,7 @@ def validate_checkpoint_systems(
     expectations: dict[str, tuple[int, str]],
     weight_source: str,
     allow_matched_continuations: bool = False,
+    allow_reaction_loss_ablation: bool = False,
 ) -> list[dict[str, Any]]:
     if len(checkpoints) < 2:
         raise ValueError("Comparison requires at least two systems")
@@ -1025,6 +1026,7 @@ def validate_checkpoint_systems(
                     "label": label,
                     "run_name": run_name,
                     "config": unified_scientific_config(config),
+                    "full_config": config,
                     "mean": resolved_normalizer.mean.cpu(),
                     "std": resolved_normalizer.std.cpu(),
                     "variance_eps": resolved_normalizer.variance_eps,
@@ -1038,7 +1040,11 @@ def validate_checkpoint_systems(
                     "format": checkpoint_format,
                     "treatment": None,
                     "expected_treatment_label": expected_treatment,
-                    "comparison_scope": "within_run_training_stage",
+                    "comparison_scope": (
+                        "controlled_reaction_loss_ablation"
+                        if allow_reaction_loss_ablation
+                        else "within_run_training_stage"
+                    ),
                     "run_name": run_name,
                     "parent": None,
                 }
@@ -1079,12 +1085,35 @@ def validate_checkpoint_systems(
                 "controlled same-source evaluator"
             )
         reference = unified_scientific_state[0]
+        if allow_reaction_loss_ablation:
+            if len(unified_scientific_state) != 2:
+                raise RuntimeError(
+                    "Reaction-loss ablation comparison requires exactly two checkpoints"
+                )
+            candidate = unified_scientific_state[1]
+            reference_config = dict(reference["full_config"])
+            candidate_config = dict(candidate["full_config"])
+            reference_reaction_loss = reference_config.pop("reaction_loss", None)
+            candidate_reaction_loss = candidate_config.pop("reaction_loss", None)
+            if (
+                reference_config != candidate_config
+                or reference_reaction_loss == candidate_reaction_loss
+            ):
+                raise RuntimeError(
+                    "Cross-run comparison must differ only in reaction_loss"
+                )
         for row in unified_scientific_state[1:]:
-            if row["run_name"] != reference["run_name"]:
+            if (
+                not allow_reaction_loss_ablation
+                and row["run_name"] != reference["run_name"]
+            ):
                 raise RuntimeError(
                     "Unified checkpoints must belong to the same training run"
                 )
-            if row["config"] != reference["config"]:
+            if (
+                not allow_reaction_loss_ablation
+                and row["config"] != reference["config"]
+            ):
                 raise RuntimeError(
                     "Unified checkpoints have different resolved scientific configs"
                 )
@@ -1240,6 +1269,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--allow_reaction_loss_ablation",
+        action="store_true",
+        help=(
+            "Allow two unified checkpoints from different runs only when their "
+            "full resolved configs differ exclusively in reaction_loss."
+        ),
+    )
+    parser.add_argument(
         "--candidate_treatment",
         default="same_source_contrast",
         help="Expected research treatment name stored in the second checkpoint.",
@@ -1290,6 +1327,7 @@ def main() -> None:
             },
             weight_source=str(args.weight_source),
             allow_matched_continuations=bool(args.allow_matched_continuations),
+            allow_reaction_loss_ablation=bool(args.allow_reaction_loss_ablation),
         )
     else:
         checkpoint_metadata = validate_checkpoint_pair(
@@ -1441,6 +1479,7 @@ def main() -> None:
         row.get("format") == UNIFIED_ACTOR_CHECKPOINT_FORMAT
         for row in checkpoint_metadata
     )
+    reaction_loss_ablation = bool(args.allow_reaction_loss_ablation)
     result = {
         "format": "hy273_edit_same_source_fixed_t_probe_v1",
         "manifest": str(manifest),
@@ -1450,7 +1489,9 @@ def main() -> None:
             None if unified_stage_comparison else str(args.candidate_treatment)
         ),
         "comparison_design": (
-            "descriptive_within_run_training_stage"
+            "controlled_cross_run_reaction_loss_ablation"
+            if reaction_loss_ablation
+            else "descriptive_within_run_training_stage"
             if unified_stage_comparison
             else "legacy_controlled_treatment"
         ),

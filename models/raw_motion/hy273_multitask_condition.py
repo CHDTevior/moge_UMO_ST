@@ -39,6 +39,7 @@ class CapabilityId(IntEnum):
     TEXT_REACTION = 4
     # Historical name used by the archived two-actor experiment.
     TEXT_INTERACTION = 4
+    REACTION_CONTROL = 5
 
 
 class TargetOp(IntEnum):
@@ -349,7 +350,10 @@ class ConditionBatch:
                     )
                 if stream != TrainStream.REACTION:
                     raise ValueError("REACTION samples must come from REACTION")
-                if capability != CapabilityId.TEXT_REACTION:
+                if capability not in {
+                    CapabilityId.TEXT_REACTION,
+                    CapabilityId.REACTION_CONTROL,
+                }:
                     raise ValueError("REACTION capability is inconsistent")
                 reaction_roles = self.source_role_id[index][self.source_present[index]]
                 valid_reaction_roles = (

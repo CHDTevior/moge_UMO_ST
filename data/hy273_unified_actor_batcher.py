@@ -192,6 +192,7 @@ class HY273UnifiedActorStepBatcher:
         verify_payload_hash: bool = False,
         interaction_exclude_overlength: bool = False,
         paired_task: str = "interaction",
+        orthogonal_control_probability: float = 0.0,
     ) -> None:
         self.multitask_manifest = Path(multitask_manifest).expanduser().resolve()
         self.interaction_root = Path(interaction_root).expanduser().resolve()
@@ -203,6 +204,11 @@ class HY273UnifiedActorStepBatcher:
             interaction_exclude_overlength
         )
         self.paired_task = str(paired_task).lower()
+        self.orthogonal_control_probability = float(
+            orthogonal_control_probability
+        )
+        if not 0.0 <= self.orthogonal_control_probability <= 1.0:
+            raise ValueError("orthogonal_control_probability must be in [0,1]")
         if self.paired_task not in {"interaction", "reaction"}:
             raise ValueError("paired_task must be 'interaction' or 'reaction'")
         self._materialize_pool = (
@@ -300,6 +306,9 @@ class HY273UnifiedActorStepBatcher:
                     global_step=int(global_step),
                     global_sample_ordinal=first_ordinal + offset,
                     run_seed=self.run_seed,
+                    orthogonal_control_probability=(
+                        self.orthogonal_control_probability
+                    ),
                 )
                 for offset, row_index in enumerate(row_indices)
             ]
@@ -317,6 +326,9 @@ class HY273UnifiedActorStepBatcher:
                 first_global_ordinal=first_ordinal,
                 run_seed=self.run_seed,
                 schedule_version=KENCODER_STAGE_BE_EDIT_SCHEDULE_VERSION,
+                orthogonal_control_probability=(
+                    self.orthogonal_control_probability
+                ),
             )
             plans.sort(
                 key=lambda plan: (

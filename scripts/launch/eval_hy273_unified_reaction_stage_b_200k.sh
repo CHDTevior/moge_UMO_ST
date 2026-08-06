@@ -23,6 +23,8 @@ STAGE_A_CHECKPOINT="${STAGE_A_CHECKPOINT:-${RUN_ROOT}/model/step_00100000.pt}"
 STAGE_B_CHECKPOINT="${STAGE_B_CHECKPOINT:-${RUN_ROOT}/model/${STAGE_B_CHECKPOINT_NAME}}"
 EVAL_ROOT="${EVAL_ROOT:-${RUN_ROOT}/eval_stage_b_${STAGE_B_K}k}"
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/mogo/bin/python}"
+KIMODO_ROOT="${KIMODO_ROOT:-/mnt/afs/mogeflow-control/external_repos/kimodo}"
+export KIMODO_ROOT
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPUS <<< "${GPU_IDS}"
 
@@ -36,8 +38,9 @@ EDIT_SHARDS=8
 EDIT_CFG=3.0
 EDIT_SYSTEMS="source_copy,source_instruction_model,shuffled_source_instruction_model,source_shuffled_instruction_model,source_only_model,relative_instruction_only_ood"
 EVAL_PHASE="${EVAL_PHASE:-all}"
+ALLOW_REACTION_LOSS_ABLATION="${ALLOW_REACTION_LOSS_ABLATION:-0}"
 MULTITASK_MANIFEST_ROOT="/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1"
-EDIT_COUNTERFACTUAL_ROOT="${ROOT_DIR}/outputs/hy273_multitask/gates"
+EDIT_COUNTERFACTUAL_ROOT="${EDIT_COUNTERFACTUAL_ROOT:-/mnt/afs/mogeflow-control/outputs/hy273_multitask/gates}"
 
 [[ ${#GPUS[@]} -ge 8 ]] || {
   echo "GPU_IDS must provide eight GPUs" >&2
@@ -58,8 +61,10 @@ for checkpoint in "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}"; do
   }
 done
 
-"${PYTHON_BIN}" - "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}" "${STAGE_B_STEP}" <<'PY'
+"${PYTHON_BIN}" - "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}" "${STAGE_B_STEP}" "${ALLOW_REACTION_LOSS_ABLATION}" <<'PY'
 import sys
+from copy import deepcopy
+
 import torch
 from train_hy273_unified_actor import CHECKPOINT_FORMAT, validate_config
 
@@ -80,23 +85,84 @@ for path, expected_step in zip(sys.argv[1:3], (100_000, int(sys.argv[3]))):
         raise RuntimeError("Final evaluation requires the source token block")
     if config["model"].get("text_token_sequence") != "sentence_plus_context":
         raise RuntimeError("Final evaluation requires the full text token sequence")
-    scientific_contract = {
-        key: config.get(key)
-        for key in (
-            "data",
-            "text",
-            "normalization",
-            "model",
-            "flow",
-            "loss",
-            "edit_loss",
-            "reaction_loss",
-        )
-    }
-    rows.append((str(checkpoint.get("run_name", "")), scientific_contract))
-if rows[0] != rows[1]:
+    ema_every = int(config["training"]["ema_every"])
+    if int(checkpoint.get("ema_update_count", -1)) != expected_step // ema_every:
+        raise RuntimeError(f"EMA update count does not match step {expected_step}: {path}")
+    batcher = checkpoint.get("batcher")
+    if not isinstance(batcher, dict):
+        raise RuntimeError(f"Checkpoint has no batcher state: {path}")
+    scheduler = batcher.get("scheduler")
+    scheduler_state = scheduler.get("state") if isinstance(scheduler, dict) else None
+    if not isinstance(scheduler_state, dict) or int(scheduler_state.get("next_step", -1)) != expected_step:
+        raise RuntimeError(f"Task scheduler does not match step {expected_step}: {path}")
+    if sum(
+        int(scheduler_state.get(key, -expected_step))
+        for key in ("realized_hml", "realized_edit", "realized_interaction")
+    ) != expected_step:
+        raise RuntimeError(f"Task scheduler counts do not sum to step {expected_step}: {path}")
+    rows.append(
+        {
+            "run_name": str(checkpoint.get("run_name", "")),
+            "config": deepcopy(config),
+            "normalizer": checkpoint.get("normalizer"),
+            "normalization": checkpoint.get("normalization"),
+            "batcher_static": {
+                key: batcher.get(key)
+                for key in (
+                    "format",
+                    "multitask_manifest",
+                    "interaction_root",
+                    "run_seed",
+                    "world_size",
+                    "interaction_exclude_overlength",
+                    "paired_task",
+                    "local_batch_sizes",
+                    "manifest_hashes",
+                )
+            },
+            "schedule": scheduler.get("segments"),
+        }
+    )
+
+
+def tensors_equal(first, second):
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    if set(first) != set(second):
+        return False
+    return all(
+        torch.equal(first[key], second[key])
+        if isinstance(first[key], torch.Tensor) and isinstance(second[key], torch.Tensor)
+        else first[key] == second[key]
+        for key in first
+    )
+
+
+if (
+    rows[0]["normalization"] != rows[1]["normalization"]
+    or not tensors_equal(rows[0]["normalizer"], rows[1]["normalizer"])
+    or rows[0]["batcher_static"] != rows[1]["batcher_static"]
+    or rows[0]["schedule"] != rows[1]["schedule"]
+):
+    raise RuntimeError("Stage-A and Stage-B do not share data, normalization, or task schedule")
+allow_reaction_loss_ablation = sys.argv[4] == "1"
+if allow_reaction_loss_ablation:
+    stage_a_config = deepcopy(rows[0]["config"])
+    stage_b_config = deepcopy(rows[1]["config"])
+    stage_a_reaction_loss = stage_a_config.pop("reaction_loss")
+    stage_b_reaction_loss = stage_b_config.pop("reaction_loss")
+    contracts_match = (
+        stage_a_config == stage_b_config
+        and stage_a_reaction_loss != stage_b_reaction_loss
+    )
+else:
+    contracts_match = (
+        rows[0]["run_name"] == rows[1]["run_name"]
+        and rows[0]["config"] == rows[1]["config"]
+    )
+if not contracts_match:
     raise RuntimeError(
-        "Stage-A and requested Stage-B checkpoints do not share one scientific model contract"
+        "Stage-A and requested Stage-B checkpoints differ outside the permitted scientific contract"
     )
 PY
 
@@ -187,6 +253,10 @@ run_dynamic_edit() {
 
 run_edit_diagnostics() {
   local root="${EVAL_ROOT}/edit/same_source"
+  local ablation_args=()
+  if [[ "${ALLOW_REACTION_LOSS_ABLATION}" == "1" ]]; then
+    ablation_args+=(--allow_reaction_loss_ablation)
+  fi
   CUDA_VISIBLE_DEVICES="${GPUS[5]}" "${PYTHON_BIN}" \
     tools/eval_hy273_edit_same_source_fixed_t.py \
     --checkpoint "stageA100k=${STAGE_A_CHECKPOINT}" \
@@ -201,6 +271,7 @@ run_edit_diagnostics() {
     --source_cfg_scale "${SOURCE_CFG}" \
     --edit_cfg_scale 3.0 \
     --direct_comparison "stageA100k,${STAGE_B_LABEL}" \
+    "${ablation_args[@]}" \
     --device cuda:0 \
     --output "${EVAL_ROOT}/edit/same_source_assignment_ema_cfg3.json"
   CUDA_VISIBLE_DEVICES="${GPUS[5]}" "${PYTHON_BIN}" \

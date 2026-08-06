@@ -140,6 +140,31 @@ def restore_reaction_world(
     return restored
 
 
+def apply_reaction_gauge(
+    motion: torch.Tensor,
+    gauge: ReactionGauge,
+) -> torch.Tensor:
+    """Map target-side Reaction observations into the source-centered gauge."""
+
+    if (
+        motion.ndim != 3
+        or motion.shape[0] != gauge.source_motion.shape[0]
+        or motion.shape[-1] != DIM_HY273
+    ):
+        raise ValueError(
+            "Reaction target observation must be [B,T,273] with matching B"
+        )
+    transformed = motion.float().clone()
+    anchor = gauge.root_anchor_xz.to(
+        device=transformed.device, dtype=transformed.dtype
+    )
+    transformed[..., ROOT_SLICE.start] -= anchor[:, 0, None]
+    transformed[..., ROOT_SLICE.start + 2] -= anchor[:, 1, None]
+    return apply_yaw_rotation(
+        transformed, gauge.yaw_delta.to(device=transformed.device)
+    )
+
+
 def restore_reaction_sample_output(
     output: MultitaskODESampleOutput,
     gauge: ReactionGauge,
@@ -196,7 +221,7 @@ def validate_sampling_mode_checkpoint(
     data = data if isinstance(data, Mapping) else {}
     model = model if isinstance(model, Mapping) else {}
     paired_task = str(data.get("paired_task", "interaction"))
-    if mode == "reaction":
+    if mode in {"reaction", "reaction_control"}:
         if checkpoint.get("format") != UNIFIED_ACTOR_CHECKPOINT_FORMAT:
             raise RuntimeError("Reaction mode requires a unified checkpoint")
         if paired_task != "reaction":
@@ -208,6 +233,13 @@ def validate_sampling_mode_checkpoint(
                 "Reaction mode requires text_token_sequence=sentence_plus_context"
             )
         next_step = int(checkpoint.get("next_global_step", -1))
+        if mode == "reaction_control":
+            control = config.get("control")
+            control = control if isinstance(control, Mapping) else {}
+            if not bool(control.get("enabled", False)) or next_step <= 350_000:
+                raise RuntimeError(
+                    "Reaction-Control requires a checkpoint trained after 350K in Control Stage C"
+                )
         if next_step <= 100_000 and not allow_stage_a_reaction_diagnostic:
             raise RuntimeError(
                 "Reaction mode requires a Stage-B checkpoint; use the explicit "
@@ -372,6 +404,7 @@ def make_reaction_condition(
     target_frames: int | None = None,
     frame_gauge_dir: torch.Tensor | None = None,
     source_person_index: int | torch.Tensor,
+    capability: CapabilityId = CapabilityId.TEXT_REACTION,
 ) -> ConditionBatch:
     """Create an observed actor condition for one reactor target.
 
@@ -379,6 +412,12 @@ def make_reaction_condition(
     (0) or second (1) person referred to by the pair-level Inter-X caption.
     """
 
+    capability = CapabilityId(capability)
+    if capability not in {
+        CapabilityId.TEXT_REACTION,
+        CapabilityId.REACTION_CONTROL,
+    }:
+        raise ValueError("Reaction condition requires a Reaction capability")
     base = make_edit_condition(
         source_motion,
         target_lengths=target_lengths,
@@ -412,7 +451,7 @@ def make_reaction_condition(
         ),
         task_id=torch.full_like(base.task_id, int(TaskId.REACTION)),
         capability_id=torch.full_like(
-            base.capability_id, int(CapabilityId.TEXT_REACTION)
+            base.capability_id, int(capability)
         ),
         text_encoding_profile=(INTERACTION_TEXT_PROFILE,) * base.batch_size,
         target_op_id=target_op,
@@ -546,6 +585,7 @@ def _route(
     expected_control = capability in {
         CapabilityId.KIMODO_CONTROL,
         CapabilityId.MOTION_EDIT_CONTROL,
+        CapabilityId.REACTION_CONTROL,
     }
     if has_control != expected_control:
         raise ValueError(
@@ -560,9 +600,12 @@ def _route(
             raise ValueError("EDIT route has a generation capability")
         return "edit", has_control
     if task == TaskId.REACTION:
-        if capability != CapabilityId.TEXT_REACTION or has_control:
-            raise ValueError("REACTION requires TEXT_REACTION without sparse control")
-        return "reaction", False
+        if capability not in {
+            CapabilityId.TEXT_REACTION,
+            CapabilityId.REACTION_CONTROL,
+        }:
+            raise ValueError("REACTION route has an invalid capability")
+        return "reaction", has_control
     raise ValueError("Two-actor INTERACTION uses its archived sampler")
 
 
@@ -585,6 +628,12 @@ def _branch_spec(
             ("empty", "source", "joint"),
             [empty, empty, texts],
             (False, False, False),
+        )
+    if route == "reaction":
+        return (
+            ("empty", "source", "joint", "all"),
+            [empty, empty, texts, texts],
+            (False, False, False, True),
         )
     return (
         ("empty", "source", "edit", "all"),
@@ -616,7 +665,7 @@ def _guided_prediction(
             + float(control_cfg_scale) * (branches["control"] - branches["empty"])
         )
         selected = guided if cfg_apply_contacts else branches["joint"].clone()
-    elif route == "reaction":
+    elif route == "reaction" and not has_control:
         guided = (
             branches["empty"]
             + float(source_cfg_scale)
@@ -625,6 +674,17 @@ def _guided_prediction(
             * (branches["joint"] - branches["source"])
         )
         selected = guided if cfg_apply_contacts else branches["joint"].clone()
+    elif route == "reaction":
+        guided = (
+            branches["empty"]
+            + float(source_cfg_scale)
+            * (branches["source"] - branches["empty"])
+            + float(text_cfg_scale)
+            * (branches["joint"] - branches["source"])
+            + float(control_cfg_scale)
+            * (branches["all"] - branches["joint"])
+        )
+        selected = guided if cfg_apply_contacts else branches["all"].clone()
     elif not has_control:
         if float(source_cfg_scale) == 1.0 and float(edit_cfg_scale) == 1.0:
             # Unified Edit is trained directly on source+instruction. At unit
@@ -1228,6 +1288,7 @@ def main() -> None:
             "edit",
             "edit_control",
             "reaction",
+            "reaction_control",
             "interaction",
         ],
         required=True,
@@ -1332,7 +1393,7 @@ def main() -> None:
 
     source = None
     reaction_gauge = None
-    if args.mode.startswith("edit") or args.mode == "reaction":
+    if args.mode.startswith("edit") or args.mode in {"reaction", "reaction_control"}:
         source = _load_array(args.source_npy, "source_npy")
         bsz = source.shape[0]
     else:
@@ -1348,7 +1409,7 @@ def main() -> None:
     )
     if target_length <= 0:
         raise ValueError("target_length must be positive")
-    if args.mode == "reaction":
+    if args.mode in {"reaction", "reaction_control"}:
         if source is None:
             raise RuntimeError("Reaction source was not loaded")
         if args.reaction_source_person_index is None:
@@ -1378,7 +1439,7 @@ def main() -> None:
     if len(texts) != bsz:
         raise ValueError("Number of --text values must match the batch size")
     lengths = torch.full((bsz,), target_length, dtype=torch.long)
-    controlled = args.mode in {"control", "edit_control"}
+    controlled = args.mode in {"control", "edit_control", "reaction_control"}
     condition = None
     if args.mode != "interaction":
         capability = {
@@ -1387,6 +1448,7 @@ def main() -> None:
             "edit": CapabilityId.MOTION_EDIT,
             "edit_control": CapabilityId.MOTION_EDIT_CONTROL,
             "reaction": CapabilityId.TEXT_REACTION,
+            "reaction_control": CapabilityId.REACTION_CONTROL,
         }[args.mode]
         if source is None:
             condition = make_absent_condition(
@@ -1395,12 +1457,13 @@ def main() -> None:
                 target_lengths=lengths,
                 capability=capability,
             )
-        elif args.mode == "reaction":
+        elif args.mode in {"reaction", "reaction_control"}:
             condition = make_reaction_condition(
                 source,
                 target_lengths=lengths,
                 frame_gauge_dir=reaction_gauge.frame_gauge_dir,
                 source_person_index=args.reaction_source_person_index,
+                capability=capability,
             )
         else:
             condition = make_edit_condition(
@@ -1409,7 +1472,10 @@ def main() -> None:
                 capability=capability,
             )
     if args.ease is not None:
-        if condition is None or args.mode.startswith("edit") or args.mode == "reaction":
+        if condition is None or args.mode.startswith("edit") or args.mode in {
+            "reaction",
+            "reaction_control",
+        }:
             raise ValueError("The first Ease protocol supports single-actor GENERATE routes only")
         ease = torch.tensor(args.ease, dtype=torch.float32).view(1, 6)
         condition = replace(
@@ -1422,7 +1488,7 @@ def main() -> None:
         [RELATIVE_EDIT_TEXT_PROFILE] * bsz
         if args.mode.startswith("edit")
         else [INTERACTION_TEXT_PROFILE] * bsz
-        if args.mode in {"reaction", "interaction"}
+        if args.mode in {"reaction", "reaction_control", "interaction"}
         else [ABSOLUTE_TEXT_PROFILE] * bsz
     )
     context_cache = getattr(model.text_encoder, "context_cache", None)
@@ -1505,6 +1571,10 @@ def main() -> None:
         mask = _load_array(args.mask_npy, "mask_npy").bool()
         if observed.shape != shape or mask.shape != shape:
             raise ValueError(f"Control arrays must have shape {shape}")
+        if args.mode == "reaction_control":
+            if reaction_gauge is None:
+                raise RuntimeError("Reaction-Control gauge was not prepared")
+            observed = apply_reaction_gauge(observed, reaction_gauge)
     else:
         observed = torch.zeros(shape)
         mask = torch.zeros(shape, dtype=torch.bool)
@@ -1529,7 +1599,7 @@ def main() -> None:
         edit_source_baseline=args.edit_source_baseline,
         edit_source_anchor_physical=source_anchor,
     )
-    if args.mode == "reaction":
+    if args.mode in {"reaction", "reaction_control"}:
         if reaction_gauge is None:
             raise RuntimeError("Reaction gauge was not prepared")
         output = restore_reaction_sample_output(output, reaction_gauge)
@@ -1552,10 +1622,14 @@ def main() -> None:
         "heading_deg": float(args.heading_deg),
         "reaction_source_person_index": (
             int(args.reaction_source_person_index)
-            if args.mode == "reaction"
+            if args.mode in {"reaction", "reaction_control"}
             else None
         ),
-        "reaction_clip_id": args.reaction_clip_id if args.mode == "reaction" else None,
+        "reaction_clip_id": (
+            args.reaction_clip_id
+            if args.mode in {"reaction", "reaction_control"}
+            else None
+        ),
         "source_fps": float(args.source_fps) if args.source_fps is not None else None,
         "ease_physical": (
             None if args.ease is None else [float(value) for value in args.ease]

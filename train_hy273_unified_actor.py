@@ -19,12 +19,24 @@ import yaml
 
 from data.hy273_multitask_scheduler import sample_key_u64
 from data.hy273_unified_actor_batcher import HY273UnifiedActorStepBatcher
-from models.raw_motion.flow_schedule import sample_timesteps
+from models.raw_motion.flow_schedule import (
+    sample_timesteps,
+    sample_timesteps_with_low_t_mixture,
+)
 from models.raw_motion.hy273_interaction_losses import (
     HY273InteractionLossWeights,
     compute_hy273_interaction_loss,
 )
-from models.raw_motion.hy273_multitask_condition import TaskId, TrainStream
+from models.raw_motion.hy273_constraints import (
+    KimodoControlCurriculum,
+    build_kimodo_control_curriculum_batch,
+)
+from models.raw_motion.hy273_multitask_condition import (
+    CapabilityId,
+    ConditionBatch,
+    TaskId,
+    TrainStream,
+)
 from models.raw_motion.hy273_multitask_losses import (
     HY273MultitaskLossWeights,
     RatioLossTerm,
@@ -45,11 +57,46 @@ RNG_CONTRACT = "stateless_sample_key_per_scene_v1"
 FULLTEXT_STAGE_A_CONTRACT = "fulltext_stage_a"
 FULLTEXT_STAGE_B_CONTRACT = "fulltext_stage_b"
 FULLTEXT_STAGE_B_CONTINUE_CONTRACT = "fulltext_stage_b_continue"
+FULLTEXT_REACTION_V2_STAGE_B_CONTRACT = "fulltext_reaction_v2_stage_b"
+FULLTEXT_STAGE_C_CONTROL_CONTRACT = "fulltext_stage_c_control"
 FULLTEXT_PHASE_CONTRACTS = (
     "",
     FULLTEXT_STAGE_A_CONTRACT,
     FULLTEXT_STAGE_B_CONTRACT,
     FULLTEXT_STAGE_B_CONTINUE_CONTRACT,
+    FULLTEXT_REACTION_V2_STAGE_B_CONTRACT,
+    FULLTEXT_STAGE_C_CONTROL_CONTRACT,
+)
+STAGE_C_CONTROL_CONFIG = {
+    "enabled": True,
+    "start_step": 350_000,
+    "end_step": 500_000,
+    "present_probability": 0.90,
+    "mixed_probability": 0.25,
+    "max_sparse_keyframes": 20,
+    "dense_min_fraction": 1.0,
+    "endpoint_preset": "kimodo_ee",
+    "endpoint_subset_mode": "random_nonempty",
+    "include_root_ref_for_endpoints": True,
+    "include_endpoint_rotations": True,
+    "include_contact_pattern": True,
+    "root_heading_probability": 0.5,
+    "continuous_loss": 0.25,
+    "contact_loss": 0.02857142857142857,
+}
+REACTION_GRADIENT_COMPONENTS = (
+    "adaptive_distance",
+    "close_vector",
+    "fine_geometry",
+    "legacy_layout_root",
+    "legacy_layout_heading",
+    "legacy_layout",
+    "true_layout",
+    "scene_state",
+    "precontact_event",
+    "first_contact_event",
+    "event_timing",
+    "remaining_relation",
 )
 
 
@@ -109,10 +156,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
     segments = list(cfg(config, "schedule.segments"))
     paired_key = "reaction" if paired_task == "reaction" else "interaction"
     max_global_step = int(cfg(config, "training.max_global_step"))
-    if max_global_step not in {200_000, 250_000, 300_000, 350_000}:
+    control_enabled = bool(cfg_optional(config, "control.enabled", False))
+    allowed_steps = (
+        {500_000}
+        if control_enabled
+        else {200_000, 250_000, 300_000, 350_000}
+    )
+    if max_global_step not in allowed_steps:
         raise ValueError(
-            "Unified actor v1 supports 200K plus 50K same-mix continuations "
-            "through 350K"
+            "Unified actor supports the frozen 200K-350K base curriculum or "
+            "the registered 350K-500K orthogonal-Control stage"
         )
     expected_segments = [
         {"start": 0, "end": 100000, "t2m": 100, "edit": 0, paired_key: 0},
@@ -128,6 +181,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             "Unified actor v1 requires 100K T2M followed by the frozen 30/35/35 mix"
         )
+    if control_enabled:
+        if paired_task != "reaction":
+            raise ValueError("Orthogonal Control Stage C requires paired_task=reaction")
+        actual_control = dict(cfg(config, "control"))
+        if actual_control != STAGE_C_CONTROL_CONFIG:
+            raise ValueError(
+                "Orthogonal Control Stage C requires the registered Kimodo control contract"
+            )
+        if bool(cfg_optional(config, "ease.enabled", False)):
+            raise ValueError("Ease must remain disabled during orthogonal Control Stage C")
     if str(cfg(config, "flow.prediction_type")) != "x0":
         raise ValueError("Unified actor v1 predicts normalized clean x0")
     if str(cfg(config, "flow.loss_space")) != "velocity_mse":
@@ -231,6 +294,38 @@ def validate_fulltext_phase_contract(
                 )
             if global_step is not None and int(global_step) != 0:
                 raise ValueError("Full-text Stage A scratch start requires global_step=0")
+        return
+
+    if phase_contract == FULLTEXT_STAGE_C_CONTROL_CONTRACT:
+        if not has_resume:
+            raise ValueError("Full-text Control Stage C requires a checkpoint")
+        if not run_dir_exists:
+            raise FileNotFoundError(
+                "Full-text Control Stage C requires the existing 350K run directory"
+            )
+        stop_step = int(declared_stop_step)
+        if stop_step not in {400_000, 450_000, 500_000}:
+            raise ValueError(
+                "Full-text Control Stage C must stop at 400K, 450K, or 500K"
+            )
+        start_step = stop_step - 50_000
+        if global_step is not None and not start_step <= int(global_step) < stop_step:
+            raise ValueError(
+                "Full-text Control Stage C resume step must be in "
+                f"[{start_step},{stop_step})"
+            )
+        return
+
+    if phase_contract == FULLTEXT_REACTION_V2_STAGE_B_CONTRACT:
+        if not has_resume:
+            raise ValueError("Reaction-v2 Stage B requires the 100K parent checkpoint")
+        stop_step = int(declared_stop_step)
+        if stop_step not in {150_000, 200_000}:
+            raise ValueError("Reaction-v2 Stage B must stop at 150K or 200K")
+        if global_step is not None and not 100_000 <= int(global_step) < stop_step:
+            raise ValueError(
+                f"Reaction-v2 resume step must be in [100000,{stop_step})"
+            )
         return
 
     if not has_resume:
@@ -429,6 +524,7 @@ def apply_learning_rates(
 
 
 def make_loss_weights(config: Mapping[str, Any]) -> HY273MultitaskLossWeights:
+    control_enabled = bool(cfg_optional(config, "control.enabled", False))
     return HY273MultitaskLossWeights(
         representation_scale=float(cfg(config, "loss.representation_scale")),
         contact=float(cfg(config, "loss.contact")),
@@ -436,8 +532,16 @@ def make_loss_weights(config: Mapping[str, Any]) -> HY273MultitaskLossWeights:
         clean_joint_velocity=float(cfg(config, "loss.clean_joint_velocity")),
         foot_lock=float(cfg(config, "loss.foot_lock")),
         fk_consistency=float(cfg(config, "loss.fk_consistency")),
-        control_continuous=0.0,
-        control_contact=0.0,
+        control_continuous=(
+            float(cfg(config, "control.continuous_loss"))
+            if control_enabled
+            else 0.0
+        ),
+        control_contact=(
+            float(cfg(config, "control.contact_loss"))
+            if control_enabled
+            else 0.0
+        ),
         velocity_t_eps=float(cfg(config, "loss.velocity_t_eps")),
         fk_warmup_steps=int(cfg(config, "loss.fk_warmup_steps")),
         fk_scale_m=float(cfg(config, "loss.fk_scale_m")),
@@ -470,12 +574,79 @@ def make_interaction_weights(
         relative_heading=float(section["relative_heading"]),
         joint_distance=float(section["joint_distance"]),
         close_joint_vector=float(section["close_joint_vector"]),
+        relative_root_radius=float(section.get("relative_root_radius", 0.0)),
+        relative_root_bearing=float(section.get("relative_root_bearing", 0.0)),
+        partner_facing=float(section.get("partner_facing", 0.0)),
+        soft_proximity=float(section.get("soft_proximity", 0.0)),
+        false_close=float(section.get("false_close", 0.0)),
+        scene_proximity=float(section.get("scene_proximity", 0.0)),
+        precontact_false_close=float(
+            section.get("precontact_false_close", 0.0)
+        ),
+        first_contact_cdf=float(section.get("first_contact_cdf", 0.0)),
         root_scale_m=float(section["root_scale_m"]),
+        heading_beta=float(section.get("heading_beta", 1.0)),
+        layout_initial_frames=int(section.get("layout_initial_frames", 0)),
+        layout_initial_multiplier=float(
+            section.get("layout_initial_multiplier", 1.0)
+        ),
+        layout_precontact_multiplier=float(
+            section.get("layout_precontact_multiplier", 1.0)
+        ),
+        layout_contact_threshold_m=float(
+            section.get(
+                "layout_contact_threshold_m", section["close_gt_threshold_m"]
+            )
+        ),
+        root_radius_scale_m=float(
+            section.get("root_radius_scale_m", section["root_scale_m"])
+        ),
         distance_scale_m=float(section["distance_scale_m"]),
+        joint_distance_mode=str(
+            section.get("joint_distance_mode", "thresholded_scaled")
+        ),
+        adaptive_distance_eps_m=float(
+            section.get("adaptive_distance_eps_m", 0.10)
+        ),
+        adaptive_distance_beta_m=float(
+            section.get("adaptive_distance_beta_m", 0.05)
+        ),
         close_vector_scale_m=float(section["close_vector_scale_m"]),
         distance_gt_threshold_m=float(section["distance_gt_threshold_m"]),
         close_gt_threshold_m=float(section["close_gt_threshold_m"]),
+        bearing_min_radius_m=float(section.get("bearing_min_radius_m", 0.10)),
+        bearing_eps_m=float(section.get("bearing_eps_m", 0.05)),
+        proximity_threshold_m=float(
+            section.get("proximity_threshold_m", section["close_gt_threshold_m"])
+        ),
+        proximity_temperature_m=float(
+            section.get("proximity_temperature_m", 0.03)
+        ),
+        false_close_margin_m=float(section.get("false_close_margin_m", 0.08)),
+        false_close_gt_threshold_m=float(
+            section.get(
+                "false_close_gt_threshold_m", section["close_gt_threshold_m"]
+            )
+        ),
+        false_close_directional_strength=float(
+            section.get("false_close_directional_strength", 0.025)
+        ),
+        precontact_directional_strength=float(
+            section.get("precontact_directional_strength", 0.25)
+        ),
+        overlap_root_fallback_m=float(
+            section.get("overlap_root_fallback_m", 1e-4)
+        ),
+        distance_include_predicted_near=bool(
+            section.get("distance_include_predicted_near", False)
+        ),
         min_flow_t=float(section["min_flow_t"]),
+        coarse_min_flow_t=float(
+            section.get("coarse_min_flow_t", section["min_flow_t"])
+        ),
+        fine_min_flow_t=float(
+            section.get("fine_min_flow_t", section["min_flow_t"])
+        ),
     )
 
 
@@ -514,6 +685,126 @@ def _generator(device: torch.device, seed: int) -> torch.Generator:
     return generator
 
 
+CONTROL_CAPABILITIES = {
+    CapabilityId.KIMODO_CONTROL,
+    CapabilityId.MOTION_EDIT_CONTROL,
+    CapabilityId.REACTION_CONTROL,
+}
+
+
+def build_orthogonal_hard_controls(
+    *,
+    target_physical: torch.Tensor,
+    condition: ConditionBatch,
+    plans: list[Any],
+    global_step: int,
+    config: Mapping[str, Any],
+    manifest_sha256: str,
+    run_seed: int,
+    stream: TrainStream,
+) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
+    """Compile sparse observations from each row's effective supervised target."""
+
+    if target_physical.ndim != 3 or target_physical.shape[-1] != DIM_HY273:
+        raise ValueError("Control targets must have shape [B,T,273]")
+    if condition.batch_size != target_physical.shape[0] or len(plans) != condition.batch_size:
+        raise ValueError("Control plans, conditions, and targets must share batch size")
+    if condition.target_frames != target_physical.shape[1]:
+        raise ValueError("Control target frames differ from ConditionBatch")
+
+    enabled = bool(cfg_optional(config, "control.enabled", False))
+    present = torch.tensor(
+        [bool(getattr(plan, "control_present", False)) for plan in plans],
+        device=target_physical.device,
+        dtype=torch.bool,
+    )
+    capability_present = torch.tensor(
+        [
+            CapabilityId(int(value)) in CONTROL_CAPABILITIES
+            for value in condition.capability_id.detach().cpu().tolist()
+        ],
+        device=target_physical.device,
+        dtype=torch.bool,
+    )
+    if not torch.equal(present, capability_present):
+        raise RuntimeError("Control plan and capability_id disagree")
+    if bool(present.any()) and not enabled:
+        raise RuntimeError("A control plan was emitted while Control Stage C is disabled")
+
+    observed = torch.zeros_like(target_physical)
+    hard_mask = torch.zeros_like(target_physical, dtype=torch.bool)
+    modes = ["none"] * condition.batch_size
+    if not bool(present.any()):
+        return observed, hard_mask, modes, present
+
+    start = int(cfg(config, "control.start_step"))
+    end = int(cfg(config, "control.end_step"))
+    if not start <= int(global_step) < end:
+        raise ValueError(
+            f"Control-present rows are outside the declared interval [{start},{end})"
+        )
+    progress = min(
+        max((int(global_step) - start + 1) / float(end - start), 0.0),
+        1.0,
+    )
+    curriculum = KimodoControlCurriculum(
+        none_prob=0.0,
+        mixed_prob=float(cfg(config, "control.mixed_probability")),
+        max_sparse_keyframes=int(cfg(config, "control.max_sparse_keyframes")),
+        dense_min_fraction=float(cfg(config, "control.dense_min_fraction")),
+        endpoint_preset=str(cfg(config, "control.endpoint_preset")),
+        endpoint_subset_mode=str(cfg(config, "control.endpoint_subset_mode")),
+        include_root_ref_for_endpoints=bool(
+            cfg(config, "control.include_root_ref_for_endpoints")
+        ),
+        include_endpoint_rotations=bool(
+            cfg(config, "control.include_endpoint_rotations")
+        ),
+        include_contact_pattern=bool(
+            cfg(config, "control.include_contact_pattern")
+        ),
+        root_heading_probability=float(
+            cfg(config, "control.root_heading_probability")
+        ),
+    )
+    paired_task = str(cfg_optional(config, "data.paired_task", "interaction"))
+    for index, plan in enumerate(plans):
+        if not bool(present[index]):
+            continue
+        result = build_kimodo_control_curriculum_batch(
+            target_physical[index : index + 1],
+            lengths=condition.requested_target_len[index : index + 1],
+            progress=progress,
+            config=curriculum,
+            generator=_generator(target_physical.device, int(plan.control_u64)),
+            root_heading_generator=_generator(
+                target_physical.device,
+                _flow_seed(
+                    plan=plan,
+                    manifest_sha256=manifest_sha256,
+                    run_seed=run_seed,
+                    stream=stream,
+                    paired_task=paired_task,
+                    random_stream_id="control_root_heading_presence",
+                ),
+            ),
+        )
+        observed[index] = result.observed_motion[0]
+        hard_mask[index] = result.motion_mask[0]
+        modes[index] = result.mode_ids[0]
+        if not bool(hard_mask[index].any()):
+            raise RuntimeError(f"Control plan emitted an empty mask for {plan.uid}")
+
+    valid = condition.target_valid.to(device=hard_mask.device)
+    if bool((hard_mask & ~valid[..., None]).any()):
+        raise RuntimeError("Control compiler wrote into target padding")
+    if not torch.equal(observed[hard_mask], target_physical[hard_mask]):
+        raise RuntimeError("Control observations differ from the effective target")
+    if bool(torch.count_nonzero(observed[~hard_mask])):
+        raise RuntimeError("Unobserved control values must remain exact zero")
+    return observed, hard_mask, modes, present
+
+
 def build_flow_batch(
     *,
     batch: Mapping[str, Any],
@@ -523,6 +814,7 @@ def build_flow_batch(
     run_seed: int,
     config: Mapping[str, Any],
     device: torch.device,
+    global_step: int,
 ) -> dict[str, Any]:
     target = batch["target_motion"].to(device=device, dtype=torch.float32)
     if target.ndim == 3:
@@ -540,30 +832,47 @@ def build_flow_batch(
     ).reshape_as(target)
 
     timesteps = []
+    low_t_selected = []
     noises = []
     for plan in batch["plans"]:
-        timesteps.append(
-            sample_timesteps(
+        timestep_generator = _generator(
+            device,
+            _flow_seed(
+                plan=plan,
+                manifest_sha256=manifest_sha256,
+                run_seed=run_seed,
+                stream=stream,
+                paired_task=str(
+                    cfg_optional(config, "data.paired_task", "interaction")
+                ),
+                random_stream_id="flow_t",
+            ),
+        )
+        paired_task = str(cfg_optional(config, "data.paired_task", "interaction"))
+        if stream == TrainStream.REACTION and paired_task == "reaction":
+            reaction_section = cfg(config, "reaction_loss")
+            sampled_timestep, sampled_low_t = sample_timesteps_with_low_t_mixture(
                 1,
                 device=device,
                 schedule=str(cfg(config, "flow.timestep_schedule")),
                 p_mean=float(cfg(config, "flow.timestep_mean")),
                 p_std=float(cfg(config, "flow.timestep_std")),
-                generator=_generator(
-                    device,
-                    _flow_seed(
-                        plan=plan,
-                        manifest_sha256=manifest_sha256,
-                        run_seed=run_seed,
-                        stream=stream,
-                        paired_task=str(
-                            cfg_optional(config, "data.paired_task", "interaction")
-                        ),
-                        random_stream_id="flow_t",
-                    ),
-                ),
+                low_t_fraction=float(reaction_section.get("low_t_fraction", 0.0)),
+                low_t_max=float(reaction_section.get("low_t_max", 0.15)),
+                generator=timestep_generator,
             )
-        )
+        else:
+            sampled_timestep = sample_timesteps(
+                1,
+                device=device,
+                schedule=str(cfg(config, "flow.timestep_schedule")),
+                p_mean=float(cfg(config, "flow.timestep_mean")),
+                p_std=float(cfg(config, "flow.timestep_std")),
+                generator=timestep_generator,
+            )
+            sampled_low_t = torch.zeros(1, device=device, dtype=torch.bool)
+        timesteps.append(sampled_timestep)
+        low_t_selected.append(sampled_low_t)
         noises.append(
             torch.randn(
                 actor_count,
@@ -587,23 +896,51 @@ def build_flow_batch(
             )
         )
     timestep = torch.cat(timesteps)
+    low_t_selected_tensor = torch.cat(low_t_selected)
     noise = torch.stack(noises)
     t_view = timestep.view(batch_size, 1, 1, 1)
     z = t_view * x0_norm + (1.0 - t_view) * noise
     hard_mask = torch.zeros_like(x0_norm, dtype=torch.bool)
     observed_norm = torch.zeros_like(x0_norm)
-    model_in = torch.cat([z, hard_mask.to(dtype=z.dtype)], dim=-1)
+    control_modes = ["none"] * batch_size
+    control_present = torch.zeros(batch_size, device=device, dtype=torch.bool)
+    if actor_count == 1:
+        condition = batch["condition"].to(device)
+        observed, mask, control_modes, control_present = (
+            build_orthogonal_hard_controls(
+                target_physical=target[:, 0],
+                condition=condition,
+                plans=list(batch["plans"]),
+                global_step=global_step,
+                config=config,
+                manifest_sha256=manifest_sha256,
+                run_seed=run_seed,
+                stream=stream,
+            )
+        )
+        hard_mask[:, 0] = mask
+        observed_norm[:, 0] = normalizer.normalize(observed) * mask.to(
+            dtype=torch.float32
+        )
+    elif bool(cfg_optional(config, "control.enabled", False)):
+        raise RuntimeError("Orthogonal Control Stage C requires a single target actor")
+    mask_f = hard_mask.to(dtype=z.dtype)
+    z_imputed = z * (1.0 - mask_f) + observed_norm * mask_f
+    model_in = torch.cat([z_imputed, mask_f], dim=-1)
     return {
         "target_physical": target,
         "x0_norm": x0_norm,
         "timestep": timestep,
+        "low_t_selected": low_t_selected_tensor,
         "noise": noise,
-        "z_imputed": z,
+        "z_imputed": z_imputed,
         "hard_mask": hard_mask,
         "observed_norm": observed_norm,
         "model_in": model_in,
         "actor_valid": actor_valid,
         "actor_count": actor_count,
+        "control_modes": control_modes,
+        "control_present": control_present,
     }
 
 
@@ -652,6 +989,25 @@ def _masked_gradient_rms(
     return torch.sqrt(numerator / denominator.clamp_min(1.0))
 
 
+def _masked_gradient_cosine(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    if tuple(valid.shape) != tuple(left.shape[:-1]) or left.shape != right.shape:
+        raise ValueError("Gradient cosine expects matching gradients and validity mask")
+    mask = valid.unsqueeze(-1).expand_as(left).float()
+    left_f = left.float()
+    right_f = right.float()
+    dot = (left_f * right_f * mask).sum()
+    left_sq = (left_f.square() * mask).sum()
+    right_sq = (right_f.square() * mask).sum()
+    if _distributed():
+        for value in (dot, left_sq, right_sq):
+            dist.all_reduce(value, op=dist.ReduceOp.SUM)
+    return dot / (left_sq.sqrt() * right_sq.sqrt()).clamp_min(1e-30)
+
+
 class MetricWindow:
     def __init__(self, device: torch.device) -> None:
         self.device = device
@@ -679,6 +1035,25 @@ class MetricWindow:
             self.ratio_denominators[key] = self.ratio_denominators.get(
                 key, denominator.new_zeros(())
             ) + denominator
+
+    def add_ratio(
+        self,
+        name: str,
+        numerator: torch.Tensor | float,
+        denominator: torch.Tensor | float,
+    ) -> None:
+        local_numerator = torch.as_tensor(
+            numerator, device=self.device, dtype=torch.float32
+        ).detach()
+        local_denominator = torch.as_tensor(
+            denominator, device=self.device, dtype=torch.float32
+        ).detach()
+        self.ratio_numerators[name] = self.ratio_numerators.get(
+            name, local_numerator.new_zeros(())
+        ) + local_numerator
+        self.ratio_denominators[name] = self.ratio_denominators.get(
+            name, local_denominator.new_zeros(())
+        ) + local_denominator
 
     def add_batch(self, actor_valid: torch.Tensor) -> None:
         self.local_actor_frames += actor_valid.sum().detach().to(dtype=torch.float64)
@@ -795,6 +1170,8 @@ def validate_resume_config(
     current_config: Mapping[str, Any],
     *,
     allow_same_mix_extension_at_step: int | None = None,
+    allow_control_stage_transition_at_step: int | None = None,
+    allow_reaction_v2_transition_at_step: int | None = None,
 ) -> None:
     if not isinstance(checkpoint_config, Mapping):
         raise ValueError("Checkpoint is missing its resolved training config")
@@ -838,7 +1215,63 @@ def validate_resume_config(
                 and current_max == current_end
                 and normalized_checkpoint == current_dict
             )
-    if not extension_matches:
+    control_transition_matches = False
+    if allow_control_stage_transition_at_step is not None:
+        boundary = int(allow_control_stage_transition_at_step)
+        checkpoint_segments = list(cfg(checkpoint_dict, "schedule.segments"))
+        current_segments = list(cfg(current_dict, "schedule.segments"))
+        if len(checkpoint_segments) == len(current_segments) and checkpoint_segments:
+            checkpoint_last = dict(checkpoint_segments[-1])
+            current_last = dict(current_segments[-1])
+            checkpoint_end = int(checkpoint_last.pop("end", -1))
+            current_end = int(current_last.pop("end", -1))
+            schedule_extension = (
+                checkpoint_segments[:-1] == current_segments[:-1]
+                and checkpoint_last == current_last
+                and checkpoint_end == boundary == 350_000
+                and current_end == 500_000
+            )
+            checkpoint_max = int(cfg(checkpoint_dict, "training.max_global_step"))
+            current_max = int(cfg(current_dict, "training.max_global_step"))
+            normalized_checkpoint = {
+                **checkpoint_dict,
+                "schedule": {
+                    **dict(checkpoint_dict["schedule"]),
+                    "segments": current_segments,
+                },
+                "training": {
+                    **dict(checkpoint_dict["training"]),
+                    "max_global_step": current_max,
+                },
+                "control": dict(cfg(current_dict, "control")),
+            }
+            control_transition_matches = (
+                schedule_extension
+                and checkpoint_max == boundary
+                and current_max == current_end
+                and not bool(cfg_optional(checkpoint_dict, "control.enabled", False))
+                and bool(cfg(current_dict, "control.enabled"))
+                and dict(cfg(current_dict, "control")) == STAGE_C_CONTROL_CONFIG
+                and normalized_checkpoint == current_dict
+            )
+    reaction_v2_transition_matches = False
+    if allow_reaction_v2_transition_at_step is not None:
+        boundary = int(allow_reaction_v2_transition_at_step)
+        if boundary == 100_000:
+            normalized_checkpoint = {
+                **checkpoint_dict,
+                "reaction_loss": dict(cfg(current_dict, "reaction_loss")),
+            }
+            reaction_v2_transition_matches = (
+                str(cfg_optional(checkpoint_dict, "data.paired_task", ""))
+                == "reaction"
+                and normalized_checkpoint == current_dict
+            )
+    if not (
+        extension_matches
+        or control_transition_matches
+        or reaction_v2_transition_matches
+    ):
         raise ValueError(
             "Resolved training config changed across unified-actor resume"
         )
@@ -867,6 +1300,8 @@ def load_checkpoint(
     config: Mapping[str, Any],
     device: torch.device,
     allow_same_mix_extension: bool = False,
+    allow_control_stage_transition: bool = False,
+    allow_reaction_v2_transition: bool = False,
 ) -> tuple[int, dict[str, torch.Tensor], int]:
     checkpoint = torch.load(
         path,
@@ -876,15 +1311,26 @@ def load_checkpoint(
     )
     if checkpoint.get("format") != CHECKPOINT_FORMAT:
         raise ValueError(f"Unsupported unified actor checkpoint: {path}")
-    validate_resume_run_name(checkpoint.get("run_name"), expected_run_name)
     if checkpoint.get("rng_contract") != RNG_CONTRACT:
         raise ValueError("Checkpoint uses a different stochastic training contract")
     checkpoint_step = int(checkpoint["next_global_step"])
-    schedule_extension_step = checkpoint_step if allow_same_mix_extension else None
+    if not (allow_reaction_v2_transition and checkpoint_step == 100_000):
+        validate_resume_run_name(checkpoint.get("run_name"), expected_run_name)
+    schedule_extension_step = (
+        checkpoint_step
+        if allow_same_mix_extension or allow_control_stage_transition
+        else None
+    )
     validate_resume_config(
         checkpoint.get("config"),
         config,
         allow_same_mix_extension_at_step=schedule_extension_step,
+        allow_control_stage_transition_at_step=(
+            checkpoint_step if allow_control_stage_transition else None
+        ),
+        allow_reaction_v2_transition_at_step=(
+            checkpoint_step if allow_reaction_v2_transition else None
+        ),
     )
     model.load_state_dict(checkpoint["model"], strict=True)
     optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1061,6 +1507,9 @@ def main() -> None:
             paired_task=str(
                 cfg_optional(config, "data.paired_task", "interaction")
             ),
+            orthogonal_control_probability=float(
+                cfg_optional(config, "control.present_probability", 0.0)
+            ),
         )
         ema = initialize_ema(model)
         ema_update_count = 0
@@ -1077,6 +1526,12 @@ def main() -> None:
                 device=device,
                 allow_same_mix_extension=(
                     args.phase_contract == FULLTEXT_STAGE_B_CONTINUE_CONTRACT
+                ),
+                allow_control_stage_transition=(
+                    args.phase_contract == FULLTEXT_STAGE_C_CONTROL_CONTRACT
+                ),
+                allow_reaction_v2_transition=(
+                    args.phase_contract == FULLTEXT_REACTION_V2_STAGE_B_CONTRACT
                 ),
             )
         validate_fulltext_phase_contract(
@@ -1150,6 +1605,9 @@ def main() -> None:
                         "parameters": parameter_count,
                         "trainable_parameters": trainable_count,
                         "task_schedule": cfg(config, "schedule.segments"),
+                        "orthogonal_control": cfg_optional(
+                            config, "control", {"enabled": False}
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -1170,6 +1628,7 @@ def main() -> None:
                 run_seed=seed,
                 config=config,
                 device=device,
+                global_step=global_step,
             )
             actors = int(flow["actor_count"])
             condition = (
@@ -1277,6 +1736,7 @@ def main() -> None:
                 interaction_bundle = None
                 base_output_grad_rms = None
                 relation_output_grad_rms = None
+                relation_gradient_metrics = None
                 if stream == TrainStream.REACTION:
                     if paired_task == "reaction":
                         if actors != 1 or condition is None:
@@ -1339,7 +1799,9 @@ def main() -> None:
                     interaction_bundle.total = sum_weighted_terms(
                         interaction_bundle.terms, prediction
                     )
-                    if 100_000 <= global_step < 100_500:
+                    # Under the exact 30/35/35 scheduler, steps through 100284
+                    # contain the first 100 Reaction updates after the 100K parent.
+                    if 100_000 <= global_step < 100_285:
                         base_output_grad = torch.autograd.grad(
                             base_bundle.total,
                             prediction,
@@ -1350,11 +1812,135 @@ def main() -> None:
                             prediction,
                             retain_graph=True,
                         )[0]
+                        adaptive_output_grad = torch.autograd.grad(
+                            interaction_bundle.terms[
+                                "interaction_joint_distance"
+                            ].weighted,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        close_vector_output_grad = torch.autograd.grad(
+                            interaction_bundle.terms[
+                                "interaction_close_joint_vector"
+                            ].weighted,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        layout_root_output_grad = torch.autograd.grad(
+                            interaction_bundle.terms[
+                                "interaction_relative_root"
+                            ].weighted,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        layout_heading_output_grad = torch.autograd.grad(
+                            interaction_bundle.terms[
+                                "interaction_relative_heading"
+                            ].weighted,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        true_layout_loss = sum(
+                            (
+                                interaction_bundle.terms[name].weighted
+                                for name in (
+                                    "interaction_relative_root_radius",
+                                    "interaction_relative_root_bearing",
+                                    "interaction_partner_facing",
+                                )
+                            ),
+                            prediction.sum() * 0.0,
+                        )
+                        scene_state_loss = sum(
+                            (
+                                interaction_bundle.terms[name].weighted
+                                for name in (
+                                    "interaction_scene_proximity_positive",
+                                    "interaction_scene_proximity_negative",
+                                )
+                            ),
+                            prediction.sum() * 0.0,
+                        )
+                        precontact_event_loss = interaction_bundle.terms[
+                            "interaction_precontact_false_close"
+                        ].weighted
+                        first_contact_event_loss = interaction_bundle.terms[
+                            "interaction_first_contact_cdf"
+                        ].weighted
+                        true_layout_output_grad = torch.autograd.grad(
+                            true_layout_loss,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        scene_state_output_grad = torch.autograd.grad(
+                            scene_state_loss,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        precontact_event_output_grad = torch.autograd.grad(
+                            precontact_event_loss,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        first_contact_event_output_grad = torch.autograd.grad(
+                            first_contact_event_loss,
+                            prediction,
+                            retain_graph=True,
+                        )[0]
+                        event_timing_output_grad = (
+                            scene_state_output_grad
+                            + precontact_event_output_grad
+                            + first_contact_event_output_grad
+                        )
+                        fine_geometry_output_grad = (
+                            adaptive_output_grad + close_vector_output_grad
+                        )
+                        legacy_layout_output_grad = (
+                            layout_root_output_grad + layout_heading_output_grad
+                        )
+                        remaining_output_grad = (
+                            relation_output_grad
+                            - fine_geometry_output_grad
+                            - legacy_layout_output_grad
+                            - true_layout_output_grad
+                            - event_timing_output_grad
+                        )
                         base_output_grad_rms = _masked_gradient_rms(
                             base_output_grad, length_mask
                         )
                         relation_output_grad_rms = _masked_gradient_rms(
                             relation_output_grad, length_mask
+                        )
+                        relation_gradient_metrics = {}
+                        for metric_name, output_grad in (
+                            ("adaptive_distance", adaptive_output_grad),
+                            ("close_vector", close_vector_output_grad),
+                            ("fine_geometry", fine_geometry_output_grad),
+                            ("legacy_layout_root", layout_root_output_grad),
+                            ("legacy_layout_heading", layout_heading_output_grad),
+                            ("legacy_layout", legacy_layout_output_grad),
+                            ("true_layout", true_layout_output_grad),
+                            ("scene_state", scene_state_output_grad),
+                            ("precontact_event", precontact_event_output_grad),
+                            ("first_contact_event", first_contact_event_output_grad),
+                            ("event_timing", event_timing_output_grad),
+                            ("remaining_relation", remaining_output_grad),
+                            ("relation", relation_output_grad),
+                        ):
+                            relation_gradient_metrics[
+                                f"{metric_name}_output_grad_rms"
+                            ] = _masked_gradient_rms(output_grad, length_mask)
+                            relation_gradient_metrics[
+                                f"{metric_name}_to_base_output_grad_cosine"
+                            ] = _masked_gradient_cosine(
+                                output_grad, base_output_grad, length_mask
+                            )
+                        relation_gradient_metrics[
+                            "true_layout_to_event_timing_output_grad_cosine"
+                        ] = _masked_gradient_cosine(
+                            true_layout_output_grad,
+                            event_timing_output_grad,
+                            length_mask,
                         )
                     total_loss = total_loss + interaction_bundle.total
 
@@ -1416,6 +2002,44 @@ def main() -> None:
             metrics_window.add_scalar(f"loss/{stream_name}/total", total_loss)
             metrics_window.add_scalar("grad/preclip_norm", grad_norm)
             metrics_window.add_scalar("time/data_seconds", data_seconds)
+            control_fraction = flow["control_present"].float().mean()
+            valid_control_entries = flow["actor_valid"][..., None].expand_as(
+                flow["hard_mask"]
+            )
+            mask_fraction = (
+                flow["hard_mask"].float().sum()
+                / valid_control_entries.float().sum().clamp_min(1.0)
+            )
+            metrics_window.add_scalar("control/present_fraction", control_fraction)
+            metrics_window.add_scalar(
+                f"control/{stream_name}/present_fraction", control_fraction
+            )
+            metrics_window.add_scalar("control/mask_fraction", mask_fraction)
+            if stream == TrainStream.REACTION and paired_task == "reaction":
+                metrics_window.add_scalar(
+                    "reaction/low_t_selected_fraction",
+                    flow["low_t_selected"].float().mean(),
+                )
+                for threshold in (0.03125, 0.0625, 0.10, 0.15):
+                    metrics_window.add_scalar(
+                        f"reaction/timestep_below_{threshold:g}_fraction",
+                        (flow["timestep"] <= threshold).float().mean(),
+                    )
+            for mode_name in (
+                "root_sparse",
+                "root_dense",
+                "endpoints",
+                "fullpose",
+                "contact",
+                "mixed",
+            ):
+                mode_fraction = sum(
+                    name.startswith(mode_name) for name in flow["control_modes"]
+                ) / max(len(flow["control_modes"]), 1)
+                metrics_window.add_scalar(
+                    f"control/{stream_name}/mode_{mode_name}_fraction",
+                    mode_fraction,
+                )
             metrics_window.add_terms(
                 f"loss/{stream_name}/base", base_bundle.terms
             )
@@ -1444,18 +2068,15 @@ def main() -> None:
                     f"loss/{relation_namespace}/relation",
                     interaction_bundle.terms,
                 )
-                metrics_window.add_scalar(
-                    f"{relation_namespace}/distance_mask_fraction",
-                    interaction_bundle.distance_mask_fraction,
-                )
-                metrics_window.add_scalar(
-                    f"{relation_namespace}/close_mask_fraction",
-                    interaction_bundle.close_mask_fraction,
-                )
-                metrics_window.add_scalar(
-                    f"{relation_namespace}/relation_active_scene_fraction",
-                    interaction_bundle.active_scene_fraction,
-                )
+                for diagnostic_name, (
+                    diagnostic_numerator,
+                    diagnostic_denominator,
+                ) in interaction_bundle.diagnostic_ratios.items():
+                    metrics_window.add_ratio(
+                        f"{relation_namespace}/{diagnostic_name}",
+                        diagnostic_numerator,
+                        diagnostic_denominator,
+                    )
                 if (
                     base_output_grad_rms is not None
                     and relation_output_grad_rms is not None
@@ -1473,6 +2094,23 @@ def main() -> None:
                         relation_output_grad_rms
                         / base_output_grad_rms.clamp_min(1e-12),
                     )
+                    if relation_gradient_metrics is not None:
+                        for metric_name, metric_value in (
+                            relation_gradient_metrics.items()
+                        ):
+                            metrics_window.add_scalar(
+                                f"{relation_namespace}/{metric_name}",
+                                metric_value,
+                            )
+                        for component in REACTION_GRADIENT_COMPONENTS:
+                            component_rms = relation_gradient_metrics[
+                                f"{component}_output_grad_rms"
+                            ]
+                            metrics_window.add_scalar(
+                                f"{relation_namespace}/{component}_to_base_output_grad_ratio",
+                                component_rms
+                                / base_output_grad_rms.clamp_min(1e-12),
+                            )
             metrics_window.add_batch(flow["actor_valid"])
             global_step += 1
 

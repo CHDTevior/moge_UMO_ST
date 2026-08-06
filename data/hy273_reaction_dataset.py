@@ -17,7 +17,10 @@ from data.hy273_multitask_manifest_dataset import (
     collate_hy273_multitask,
     sha256_file,
 )
-from data.hy273_multitask_scheduler import sample_key_u64
+from data.hy273_multitask_scheduler import (
+    orthogonal_control_from_ordinal,
+    sample_key_u64,
+)
 from models.raw_motion.hy273_multitask_condition import (
     CapabilityId,
     FramePolicy,
@@ -102,6 +105,8 @@ class ReactionSamplePlan:
     crop_start: int
     yaw_u64: int
     condition_pattern: ReactionConditionPattern
+    control_u64: int = 0
+    control_present: bool = False
 
 
 class HY273ReactionDataset:
@@ -201,6 +206,7 @@ class HY273ReactionDataset:
         global_step: int,
         global_sample_ordinal: int,
         run_seed: int,
+        orthogonal_control_probability: float = 0.0,
     ) -> ReactionSamplePlan:
         row = self.rows[int(row_index)]
         uid = str(row["clip_id"])
@@ -227,6 +233,12 @@ class HY273ReactionDataset:
             crop_start=int(draw("paired_crop") % crop_choices),
             yaw_u64=draw("shared_yaw_phi"),
             condition_pattern=reaction_pattern_from_draw(draw("condition_pattern")),
+            control_u64=draw("control_pattern"),
+            control_present=orthogonal_control_from_ordinal(
+                global_sample_ordinal,
+                orthogonal_control_probability,
+                phase=int(TrainStream.REACTION) * 3,
+            ),
         )
 
     def _load_actor(self, relative_path: str, expected_frames: int) -> torch.Tensor:
@@ -304,7 +316,11 @@ class HY273ReactionDataset:
             "dataset": "interx_k273_reaction",
             "train_stream_id": int(TrainStream.REACTION),
             "task_id": int(TaskId.REACTION),
-            "capability_id": int(CapabilityId.TEXT_REACTION),
+            "capability_id": int(
+                CapabilityId.REACTION_CONTROL
+                if plan.control_present
+                else CapabilityId.TEXT_REACTION
+            ),
             "text": text,
             "text_encoding_profile": INTERACTION_TEXT_PROFILE,
             "target_motion": target,

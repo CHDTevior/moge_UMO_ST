@@ -18,7 +18,9 @@ import numpy as np
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-KIMODO_ROOT = REPO_ROOT / "external_repos" / "kimodo"
+KIMODO_ROOT = Path(
+    os.environ.get("KIMODO_ROOT", REPO_ROOT / "external_repos" / "kimodo")
+).expanduser().resolve()
 for path in (REPO_ROOT, KIMODO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))

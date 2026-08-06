@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -537,6 +538,29 @@ def bernoulli_from_draw(draw: int, probability: float) -> bool:
     return int(draw) < min(threshold, 1 << 64)
 
 
+def orthogonal_control_from_ordinal(
+    global_sample_ordinal: int,
+    probability: float,
+    *,
+    phase: int = 0,
+) -> bool:
+    """Allocate control exactly and replayably, independent of task semantics."""
+
+    if not 0.0 <= float(probability) <= 1.0:
+        raise ValueError("Control probability must be in [0,1]")
+    fraction = Fraction(str(float(probability))).limit_denominator(1000)
+    if abs(float(fraction) - float(probability)) > 1e-12:
+        raise ValueError("Control probability must have an exact denominator <= 1000")
+    if fraction.numerator == 0:
+        return False
+    if fraction.numerator == fraction.denominator:
+        return True
+    position = int(global_sample_ordinal) + int(phase)
+    before = (position * fraction.numerator) // fraction.denominator
+    after = ((position + 1) * fraction.numerator) // fraction.denominator
+    return after > before
+
+
 def ease_present_from_draw(
     capability: CapabilityId,
     draw: int,
@@ -592,6 +616,7 @@ class SamplePlan:
     control_u64: int
     text_drop: bool
     edit_pattern: EditConditionPattern | None
+    control_present: bool = False
     ease_present: bool = False
 
 

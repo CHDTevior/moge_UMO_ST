@@ -45,10 +45,39 @@ CAUSAL_ADVANTAGE_DIRECTIONS = {
     "reactor_position_mpjpe_cm": "lower",
     "reactor_fk_mpjpe_cm": "lower",
     "reactor_root_error_cm": "lower",
+    "frame0_relative_root_error_cm": "lower",
+    "initial_15f_relative_root_error_cm": "lower",
+    "precontact_relative_root_error_cm": "lower",
+    "relative_root_radius_error_cm": "lower",
+    "relative_root_bearing_error_deg": "lower",
+    "partner_facing_error_deg": "lower",
     "relative_heading_error_deg": "lower",
+    "frame0_relative_heading_error_deg": "lower",
+    "initial_15f_relative_heading_error_deg": "lower",
+    "precontact_relative_heading_error_deg": "lower",
+    "first_close_timing_error_s_20cm": "lower",
+    "first_close_too_early_s_20cm": "lower",
+    "first_close_too_late_s_20cm": "lower",
+    "precontact_false_close_rate_20cm": "lower",
     "position_relation_distance_mae_cm": "lower",
     "fk_relation_distance_mae_cm": "lower",
     "close_event_error_20cm": "lower",
+    "fk_close_event_error_20cm": "lower",
+    "close_10cm_precision": "higher",
+    "close_10cm_recall": "higher",
+    "close_10cm_f1": "higher",
+    "false_close_rate_10cm": "lower",
+    "missed_close_rate_10cm": "lower",
+    "close_20cm_precision": "higher",
+    "close_20cm_recall": "higher",
+    "close_20cm_f1": "higher",
+    "false_close_rate_20cm": "lower",
+    "missed_close_rate_20cm": "lower",
+    "close_30cm_precision": "higher",
+    "close_30cm_recall": "higher",
+    "close_30cm_f1": "higher",
+    "false_close_rate_30cm": "lower",
+    "missed_close_rate_30cm": "lower",
     "reactor_contact_accuracy": "higher",
     "reactor_contact_f1": "higher",
     "reactor_fk_jerk_error_mps3": "lower",
@@ -64,6 +93,36 @@ FINAL_CAPTION_POLICY = "uid_balanced"
 FINAL_SEED = 20260801
 FINAL_SELECTION_POLICY = "preregistered_fixed_before_val_and_test"
 FINAL_SPLITS = ["val", "test"]
+CLOSE_THRESHOLDS_CM = (10, 20, 30)
+CLOSE_EVENT_PREFIXES = ("", "fk_")
+MICRO_CLOSE_METRIC_NAMES = {
+    f"{name_prefix}close_{threshold}cm_{metric}"
+    for name_prefix in CLOSE_EVENT_PREFIXES
+    for threshold in CLOSE_THRESHOLDS_CM
+    for metric in ("precision", "recall", "f1")
+} | {
+    f"{name_prefix}{metric}_{threshold}cm"
+    for name_prefix in CLOSE_EVENT_PREFIXES
+    for metric in ("false_close_rate", "missed_close_rate")
+    for threshold in CLOSE_THRESHOLDS_CM
+}
+POOLED_PRECONTACT_METRICS = {
+    "precontact_false_close_rate_20cm": "precontact_false_close_frames_20cm",
+    "precontact_relative_root_error_cm": "precontact_relative_root_error_sum_cm",
+    "precontact_relative_heading_error_deg": (
+        "precontact_relative_heading_error_sum_deg"
+    ),
+}
+MICRO_PRECONTACT_METRIC_NAMES = set(POOLED_PRECONTACT_METRICS)
+PRECONTACT_COMPONENT_FIELDS = set(POOLED_PRECONTACT_METRICS.values()) | {
+    "precontact_valid_frames_20cm"
+}
+CAUSAL_ADVANTAGE_DIRECTIONS.update(
+    {
+        name: "higher" if name.endswith(("_precision", "_recall", "_f1")) else "lower"
+        for name in MICRO_CLOSE_METRIC_NAMES
+    }
+)
 
 
 def _validate_final_protocol_runtime(
@@ -378,19 +437,293 @@ def _bootstrap_mean(
     }
 
 
+def _bootstrap_ratio(
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    *,
+    seed: int,
+    resamples: int,
+    confidence: float,
+    undefined_as_none: bool = False,
+) -> dict[str, float | int | None]:
+    numerator = np.asarray(numerator, dtype=np.float64)
+    denominator = np.asarray(denominator, dtype=np.float64)
+    if (
+        numerator.ndim != 1
+        or numerator.shape != denominator.shape
+        or numerator.size == 0
+        or not np.isfinite(numerator).all()
+        or not np.isfinite(denominator).all()
+        or (numerator < 0).any()
+        or (denominator < 0).any()
+    ):
+        raise ValueError("Bootstrap ratio inputs must be aligned finite counts")
+
+    def ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+        return np.divide(
+            num,
+            den,
+            out=np.zeros_like(num, dtype=np.float64),
+            where=den > 0,
+        )
+
+    total_denominator = float(denominator.sum())
+    if undefined_as_none and total_denominator <= 0.0:
+        return {
+            "n": int(numerator.size),
+            "valid_n": 0,
+            "denominator": 0.0,
+            "mean": None,
+            "ci_low": None,
+            "ci_high": None,
+        }
+
+    rng = np.random.default_rng(int(seed))
+    if numerator.size == 1:
+        ratios = ratio(numerator, denominator)
+        bootstrap_denominator = denominator
+    else:
+        ratios = np.empty(int(resamples), dtype=np.float64)
+        bootstrap_denominator = np.empty(int(resamples), dtype=np.float64)
+        chunk = max(1, min(512, int(resamples)))
+        for start in range(0, int(resamples), chunk):
+            stop = min(start + chunk, int(resamples))
+            indices = rng.integers(
+                0, numerator.size, size=(stop - start, numerator.size)
+            )
+            sampled_numerator = numerator[indices].sum(axis=1)
+            sampled_denominator = denominator[indices].sum(axis=1)
+            ratios[start:stop] = ratio(sampled_numerator, sampled_denominator)
+            bootstrap_denominator[start:stop] = sampled_denominator
+    point = float(ratio(numerator.sum(keepdims=True), denominator.sum(keepdims=True))[0])
+    if undefined_as_none:
+        ratios = ratios[bootstrap_denominator > 0]
+    alpha = (1.0 - float(confidence)) / 2.0
+    output: dict[str, float | int | None] = {
+        "n": int(numerator.size),
+        "mean": point,
+        "ci_low": float(np.quantile(ratios, alpha)),
+        "ci_high": float(np.quantile(ratios, 1.0 - alpha)),
+    }
+    if undefined_as_none:
+        output["valid_n"] = int((denominator > 0).sum())
+        output["denominator"] = total_denominator
+    return output
+
+
+def _micro_close_event_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    seed: int,
+    resamples: int,
+    confidence: float,
+) -> dict[str, dict[str, float | int | None]]:
+    result: dict[str, dict[str, float | int | None]] = {}
+    offset = 0
+    for name_prefix in CLOSE_EVENT_PREFIXES:
+        for threshold_cm in CLOSE_THRESHOLDS_CM:
+            prefix = f"{name_prefix}close_{threshold_cm}cm"
+            if f"{prefix}_tp" not in rows[0]:
+                continue
+
+            def counts(name: str) -> np.ndarray:
+                return np.asarray(
+                    [int(row[f"{prefix}_{name}"]) for row in rows],
+                    dtype=np.float64,
+                )
+
+            tp = counts("tp")
+            fp = counts("fp")
+            fn = counts("fn")
+            target_positive = counts("target_positive")
+            target_negative = counts("target_negative")
+            specifications = {
+                f"{prefix}_precision": (tp, tp + fp),
+                f"{prefix}_recall": (tp, tp + fn),
+                f"{prefix}_f1": (2.0 * tp, 2.0 * tp + fp + fn),
+                f"{name_prefix}false_close_rate_{threshold_cm}cm": (
+                    fp,
+                    target_negative,
+                ),
+                f"{name_prefix}missed_close_rate_{threshold_cm}cm": (
+                    fn,
+                    target_positive,
+                ),
+            }
+            for name, (numerator, denominator) in specifications.items():
+                result[name] = _bootstrap_ratio(
+                    numerator,
+                    denominator,
+                    seed=int(seed) + offset,
+                    resamples=resamples,
+                    confidence=confidence,
+                    undefined_as_none=True,
+                )
+                offset += 1
+    return result
+
+
+def _close_ratio_components(
+    rows: list[dict[str, Any]], metric: str
+) -> tuple[np.ndarray, np.ndarray]:
+    for name_prefix in CLOSE_EVENT_PREFIXES:
+        for threshold_cm in CLOSE_THRESHOLDS_CM:
+            prefix = f"{name_prefix}close_{threshold_cm}cm"
+
+            def counts(name: str) -> np.ndarray:
+                return np.asarray(
+                    [int(row[f"{prefix}_{name}"]) for row in rows],
+                    dtype=np.float64,
+                )
+
+            if metric == f"{prefix}_precision":
+                tp, fp = counts("tp"), counts("fp")
+                return tp, tp + fp
+            if metric == f"{prefix}_recall":
+                tp, fn = counts("tp"), counts("fn")
+                return tp, tp + fn
+            if metric == f"{prefix}_f1":
+                tp, fp, fn = counts("tp"), counts("fp"), counts("fn")
+                return 2.0 * tp, 2.0 * tp + fp + fn
+            if metric == f"{name_prefix}false_close_rate_{threshold_cm}cm":
+                return counts("fp"), counts("target_negative")
+            if metric == f"{name_prefix}missed_close_rate_{threshold_cm}cm":
+                return counts("fn"), counts("target_positive")
+    raise KeyError(f"Unsupported micro close metric: {metric}")
+
+
+def _precontact_ratio_components(
+    rows: list[dict[str, Any]], metric: str
+) -> tuple[np.ndarray, np.ndarray]:
+    if metric not in POOLED_PRECONTACT_METRICS:
+        raise KeyError(f"Unsupported precontact ratio metric: {metric}")
+    return (
+        np.asarray(
+            [float(row[POOLED_PRECONTACT_METRICS[metric]]) for row in rows],
+            dtype=np.float64,
+        ),
+        np.asarray(
+            [int(row["precontact_valid_frames_20cm"]) for row in rows],
+            dtype=np.float64,
+        ),
+    )
+
+
+def _bootstrap_matched_ratio_advantage(
+    correct_numerator: np.ndarray,
+    correct_denominator: np.ndarray,
+    ablated_numerator: np.ndarray,
+    ablated_denominator: np.ndarray,
+    *,
+    direction: str,
+    seed: int,
+    resamples: int,
+    confidence: float,
+    undefined_as_none: bool = False,
+) -> dict[str, float | int | None]:
+    arrays = tuple(
+        np.asarray(value, dtype=np.float64)
+        for value in (
+            correct_numerator,
+            correct_denominator,
+            ablated_numerator,
+            ablated_denominator,
+        )
+    )
+    if (
+        any(value.ndim != 1 for value in arrays)
+        or len({value.shape for value in arrays}) != 1
+        or arrays[0].size == 0
+        or any(not np.isfinite(value).all() for value in arrays)
+        or any((value < 0).any() for value in arrays)
+    ):
+        raise ValueError("Matched ratio inputs must be aligned finite non-negative vectors")
+
+    def ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+        return np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator, dtype=np.float64),
+            where=denominator > 0,
+        )
+
+    if undefined_as_none and (
+        float(arrays[1].sum()) <= 0.0 or float(arrays[3].sum()) <= 0.0
+    ):
+        return {
+            "n": int(arrays[0].size),
+            "valid_n": 0,
+            "mean": None,
+            "ci_low": None,
+            "ci_high": None,
+        }
+
+    def advantage(indices: np.ndarray | None = None) -> np.ndarray:
+        selected = arrays if indices is None else tuple(value[indices] for value in arrays)
+        correct = ratio(
+            selected[0].sum(axis=-1, keepdims=True),
+            selected[1].sum(axis=-1, keepdims=True),
+        )[..., 0]
+        ablated = ratio(
+            selected[2].sum(axis=-1, keepdims=True),
+            selected[3].sum(axis=-1, keepdims=True),
+        )[..., 0]
+        return correct - ablated if direction == "higher" else ablated - correct
+
+    point = float(advantage()[()])
+    if arrays[0].size == 1:
+        bootstrap = np.asarray([point], dtype=np.float64)
+        bootstrap_valid = np.asarray(
+            [bool(arrays[1][0] > 0 and arrays[3][0] > 0)], dtype=bool
+        )
+    else:
+        rng = np.random.default_rng(int(seed))
+        bootstrap = np.empty(int(resamples), dtype=np.float64)
+        bootstrap_valid = np.empty(int(resamples), dtype=bool)
+        chunk = max(1, min(512, int(resamples)))
+        for start in range(0, int(resamples), chunk):
+            stop = min(start + chunk, int(resamples))
+            indices = rng.integers(
+                0, arrays[0].size, size=(stop - start, arrays[0].size)
+            )
+            bootstrap[start:stop] = advantage(indices)
+            bootstrap_valid[start:stop] = (
+                (arrays[1][indices].sum(axis=1) > 0)
+                & (arrays[3][indices].sum(axis=1) > 0)
+            )
+    if undefined_as_none:
+        bootstrap = bootstrap[bootstrap_valid]
+    alpha = (1.0 - float(confidence)) / 2.0
+    output: dict[str, float | int | None] = {
+        "n": int(arrays[0].size),
+        "mean": point,
+        "ci_low": float(np.quantile(bootstrap, alpha)),
+        "ci_high": float(np.quantile(bootstrap, 1.0 - alpha)),
+    }
+    if undefined_as_none:
+        output["valid_n"] = int(((arrays[1] > 0) & (arrays[3] > 0)).sum())
+    return output
+
+
 def _aggregate_rows(
     rows: list[dict[str, Any]],
     *,
     seed: int,
     resamples: int,
     confidence: float,
-) -> dict[str, dict[str, float | int]]:
+) -> dict[str, dict[str, float | int | None]]:
     metric_names = sorted(
         key
         for key, value in rows[0].items()
-        if isinstance(value, float) and np.isfinite(value)
+        if (
+            isinstance(value, float)
+            and np.isfinite(value)
+            and key not in MICRO_CLOSE_METRIC_NAMES
+            and key not in MICRO_PRECONTACT_METRIC_NAMES
+            and key not in PRECONTACT_COMPONENT_FIELDS
+        )
     )
-    return {
+    result = {
         metric: _bootstrap_mean(
             np.asarray([float(row[metric]) for row in rows]),
             seed=int(seed) + index,
@@ -399,6 +732,31 @@ def _aggregate_rows(
         )
         for index, metric in enumerate(metric_names)
     }
+    result.update(
+        _micro_close_event_metrics(
+            rows,
+            seed=int(seed) + len(metric_names),
+            resamples=resamples,
+            confidence=confidence,
+        )
+    )
+    for offset, (metric, numerator_field) in enumerate(
+        POOLED_PRECONTACT_METRICS.items()
+    ):
+        if {
+            numerator_field,
+            "precontact_valid_frames_20cm",
+        } <= rows[0].keys():
+            numerator, denominator = _precontact_ratio_components(rows, metric)
+            result[metric] = _bootstrap_ratio(
+                numerator,
+                denominator,
+                seed=int(seed) + len(metric_names) + len(result) + offset,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+    return result
 
 
 def _stratify(
@@ -440,28 +798,70 @@ def _matched_advantage(
         key
         for key, value in correct[0].items()
         if (
-            isinstance(value, float)
+            (
+                isinstance(value, float)
+                or key in MICRO_CLOSE_METRIC_NAMES
+                or key in MICRO_PRECONTACT_METRIC_NAMES
+            )
             and key in ablated[0]
             and key in CAUSAL_ADVANTAGE_DIRECTIONS
         )
     )
     output = {}
     for index, metric in enumerate(metric_names):
-        correct_values = np.asarray([float(row[metric]) for row in correct])
-        ablated_values = np.asarray([float(row[metric]) for row in ablated])
         direction = CAUSAL_ADVANTAGE_DIRECTIONS[metric]
-        advantage = (
-            correct_values - ablated_values
-            if direction == "higher"
-            else ablated_values - correct_values
-        )
-        output[metric] = {
-            **_bootstrap_mean(
+        if metric in MICRO_CLOSE_METRIC_NAMES:
+            correct_numerator, correct_denominator = _close_ratio_components(
+                correct, metric
+            )
+            ablated_numerator, ablated_denominator = _close_ratio_components(
+                ablated, metric
+            )
+            statistics = _bootstrap_matched_ratio_advantage(
+                correct_numerator,
+                correct_denominator,
+                ablated_numerator,
+                ablated_denominator,
+                direction=direction,
+                seed=seed + index,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+        elif metric in MICRO_PRECONTACT_METRIC_NAMES:
+            correct_numerator, correct_denominator = _precontact_ratio_components(
+                correct, metric
+            )
+            ablated_numerator, ablated_denominator = _precontact_ratio_components(
+                ablated, metric
+            )
+            statistics = _bootstrap_matched_ratio_advantage(
+                correct_numerator,
+                correct_denominator,
+                ablated_numerator,
+                ablated_denominator,
+                direction=direction,
+                seed=seed + index,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+        else:
+            correct_values = np.asarray([float(row[metric]) for row in correct])
+            ablated_values = np.asarray([float(row[metric]) for row in ablated])
+            advantage = (
+                correct_values - ablated_values
+                if direction == "higher"
+                else ablated_values - correct_values
+            )
+            statistics = _bootstrap_mean(
                 advantage,
                 seed=seed + index,
                 resamples=resamples,
                 confidence=confidence,
-            ),
+            )
+        output[metric] = {
+            **statistics,
             "metric_direction": direction,
             "positive_means_source_text_is_better": True,
         }

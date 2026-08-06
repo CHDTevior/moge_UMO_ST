@@ -49,6 +49,55 @@ def sample_timesteps(
     raise ValueError(f"Unknown timestep schedule: {schedule}")
 
 
+def sample_timesteps_with_low_t_mixture(
+    batch_size: int,
+    device: torch.device,
+    *,
+    schedule: str = "logit_normal",
+    p_mean: float = 0.0,
+    p_std: float = 1.0,
+    low_t_fraction: float = 0.0,
+    low_t_max: float = 0.15,
+    eps: float = 1e-4,
+    generator: Optional[torch.Generator] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mix the base schedule with an explicit near-noise training stratum."""
+
+    fraction = float(low_t_fraction)
+    maximum = float(low_t_max)
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("low_t_fraction must be in [0,1]")
+    if not float(eps) < maximum < 1.0:
+        raise ValueError("low_t_max must lie strictly between eps and 1")
+
+    base = sample_timesteps(
+        batch_size,
+        device,
+        schedule=schedule,
+        p_mean=p_mean,
+        p_std=p_std,
+        eps=eps,
+        generator=generator,
+    )
+    if fraction == 0.0:
+        return base, torch.zeros(batch_size, device=device, dtype=torch.bool)
+
+    selected = torch.rand(
+        batch_size,
+        device=device,
+        generator=generator,
+    ) < fraction
+    low = torch.rand(
+        batch_size,
+        device=device,
+        generator=generator,
+    )
+    low = (float(eps) + low * (maximum - float(eps))).clamp(
+        float(eps), maximum
+    )
+    return torch.where(selected, low, base), selected
+
+
 def make_ode_grid(num_steps: int, device: torch.device) -> torch.Tensor:
     if num_steps <= 0:
         raise ValueError(f"num_steps must be positive, got {num_steps}")

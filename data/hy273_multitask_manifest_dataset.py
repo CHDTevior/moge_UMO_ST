@@ -19,6 +19,7 @@ from data.hy273_multitask_scheduler import (
     ease_present_from_draw,
     edit_pattern_from_draw,
     hml_capability_from_draw,
+    orthogonal_control_from_ordinal,
     sample_key_u64,
 )
 from models.raw_motion.hy273_multitask_condition import (
@@ -312,6 +313,7 @@ def build_global_sample_plans(
     first_global_ordinal: int,
     run_seed: int,
     schedule_version: str = HIGH_LEVEL_SCHEDULE_VERSION,
+    orthogonal_control_probability: float = 0.0,
 ) -> list[SamplePlan]:
     plans: list[SamplePlan] = []
     for offset, row_index in enumerate(row_indices):
@@ -330,12 +332,22 @@ def build_global_sample_plans(
                 random_stream_id=name,
             )
 
+        control_present = orthogonal_control_from_ordinal(
+            ordinal,
+            orthogonal_control_probability,
+            phase=int(dataset.stream) * 3,
+        )
         if dataset.stream == TrainStream.HML_MIXED:
-            capability = hml_capability_from_draw(
+            legacy_capability = hml_capability_from_draw(
                 global_step,
                 draw("hml_capability"),
                 schedule_version,
             )
+            capability = (
+                CapabilityId.KIMODO_CONTROL
+                if control_present
+                else CapabilityId.T2M
+            ) if orthogonal_control_probability > 0.0 else legacy_capability
             caption_index = draw("caption") % dataset.caption_count(row_index)
             text_drop = bernoulli_from_draw(draw("hml_text_dropout"), 0.10)
             ease_present = ease_present_from_draw(
@@ -350,7 +362,7 @@ def build_global_sample_plans(
             )
             capability = (
                 CapabilityId.MOTION_EDIT_CONTROL
-                if edit_pattern.uses_control
+                if control_present or edit_pattern.uses_control
                 else CapabilityId.MOTION_EDIT
             )
             caption_index = None
@@ -369,6 +381,7 @@ def build_global_sample_plans(
                 control_u64=draw("control_pattern"),
                 text_drop=bool(text_drop),
                 edit_pattern=edit_pattern,
+                control_present=bool(control_present),
                 ease_present=bool(ease_present),
             )
         )
