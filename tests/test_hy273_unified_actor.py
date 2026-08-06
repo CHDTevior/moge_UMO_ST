@@ -40,10 +40,12 @@ from models.raw_motion.hy273_unified_edit_losses import (
 )
 from models.raw_motion.hy273_slices import (
     DIM_HY273,
+    GLOBAL_ROT_SLICE,
     HEADING_SLICE,
     JOINT_POS_SLICE,
     LOCAL_ROOT_DIM,
     ROOT_SLICE,
+    fk_positions_from_global_rot6d,
     reconstruct_global_joints_from_features,
 )
 from models.raw_motion.hy273_unified_actor_flow import HY273UnifiedActorFlow
@@ -403,6 +405,214 @@ def _reaction_v5_event_weights(
     }
     values.update(overrides)
     return HY273InteractionLossWeights(**values)
+
+
+def _identity_interaction_motion(frames: int = 4) -> torch.Tensor:
+    motion = torch.zeros(1, 2, frames, DIM_HY273)
+    motion[..., HEADING_SLICE] = torch.tensor([1.0, 0.0])
+    motion[..., GLOBAL_ROT_SLICE] = torch.tensor(
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    ).repeat(22)
+    return motion
+
+
+def _reaction_v5_1_contact_weights(
+    **overrides: object,
+) -> HY273InteractionLossWeights:
+    values: dict[str, object] = {
+        "fk_contact_map_positive": 1.0,
+        "fk_contact_map_negative": 1.0,
+        "fk_contact_vector": 1.0,
+        "fk_contact_transition": 1.0,
+        "fk_contact_threshold_m": 0.15,
+        "fk_contact_temperature_m": 0.02,
+        "fk_contact_vector_scale_m": 0.05,
+        "fk_contact_transition_beta": 0.10,
+    }
+    values.update(overrides)
+    return replace(_reaction_v5_event_weights(), **values)
+
+
+def test_reaction_v5_1_full_contact_is_zero_for_exact_prediction() -> None:
+    target = _identity_interaction_motion(frames=4)
+    target[:, 1, 3, ROOT_SLICE.start] = 3.0
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=target.clone(),
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=_reaction_v5_1_contact_weights(),
+    )
+    for name in (
+        "interaction_fk_contact_map_positive",
+        "interaction_fk_contact_map_negative",
+        "interaction_fk_contact_vector",
+        "interaction_fk_contact_transition",
+    ):
+        assert float(bundle.terms[name].raw) == 0.0
+
+
+def test_reaction_v5_1_fk_contact_error_reaches_root_and_rotation_channels() -> None:
+    target = _identity_interaction_motion(frames=3)
+    prediction = target.clone()
+    prediction[:, 1] = apply_yaw_rotation(
+        prediction[:, 1], torch.tensor(0.6)
+    )
+    prediction[:, 1, :, ROOT_SLICE.start] += 0.08
+    prediction.requires_grad_()
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 3, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=_reaction_v5_1_contact_weights(),
+    )
+    full_contact = sum(
+        bundle.terms[name].weighted
+        for name in (
+            "interaction_fk_contact_map_positive",
+            "interaction_fk_contact_map_negative",
+            "interaction_fk_contact_vector",
+            "interaction_fk_contact_transition",
+        )
+    )
+    assert float(full_contact) > 0.0
+    full_contact.backward()
+    assert prediction.grad is not None
+    assert float(prediction.grad[:, 1, :, ROOT_SLICE].norm()) > 0.0
+    assert float(prediction.grad[:, 1, :, GLOBAL_ROT_SLICE].norm()) > 0.0
+
+
+def test_reaction_v5_1_negative_contact_separates_exact_root_overlap() -> None:
+    target = _identity_interaction_motion(frames=1)
+    target[:, 1, :, ROOT_SLICE.start] = 3.0
+    prediction = _identity_interaction_motion(frames=1).requires_grad_()
+    weights = _reaction_v5_1_contact_weights(
+        fk_contact_map_positive=0.0,
+        fk_contact_vector=0.0,
+        fk_contact_transition=0.0,
+    )
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 1, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    term = bundle.terms["interaction_fk_contact_map_negative"]
+    assert float(term.raw) > 0.0
+    term.weighted.backward()
+    assert prediction.grad is not None
+    reactor_root_x_gradient = prediction.grad[0, 1, 0, ROOT_SLICE.start]
+    assert torch.isfinite(reactor_root_x_gradient)
+    assert float(reactor_root_x_gradient) < 0.0
+    assert float(prediction.grad[0, 1, 0, JOINT_POS_SLICE].abs().max()) < 1e-6
+
+
+def test_reaction_v5_1_negative_contact_uses_fk_vertical_root_carrier() -> None:
+    target = _identity_interaction_motion(frames=1)
+    pelvis_y = JOINT_POS_SLICE.start + 1
+    target[:, 1, :, pelvis_y] = 3.0
+    prediction = _identity_interaction_motion(frames=1).requires_grad_()
+    weights = _reaction_v5_1_contact_weights(
+        fk_contact_map_positive=0.0,
+        fk_contact_vector=0.0,
+        fk_contact_transition=0.0,
+    )
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 1, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    bundle.terms["interaction_fk_contact_map_negative"].weighted.backward()
+    assert prediction.grad is not None
+    assert float(prediction.grad[0, 1, 0, pelvis_y]) < 0.0
+    assert abs(float(prediction.grad[0, 1, 0, ROOT_SLICE.start + 1])) < 1e-8
+
+
+def test_reaction_v5_1_contact_map_normalizes_positive_and_negative_pairs_separately() -> None:
+    target = _identity_interaction_motion(frames=2)
+    target[:, 1, 1, ROOT_SLICE.start] = 3.0
+    prediction = target.clone()
+    prediction[:, 1, 0, ROOT_SLICE.start] += 0.05
+    prediction[:, 1, 1, ROOT_SLICE.start] -= 0.05
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 2, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=_reaction_v5_1_contact_weights(
+            fk_contact_vector=0.0,
+            fk_contact_transition=0.0,
+        ),
+    )
+    target_fk = fk_positions_from_global_rot6d(target.reshape(2, 2, DIM_HY273))
+    target_distance = torch.cdist(target_fk[0], target_fk[1])
+    positive = int((target_distance < 0.15).sum().item())
+    total = 2 * 22 * 22
+    positive_term = bundle.terms["interaction_fk_contact_map_positive"]
+    negative_term = bundle.terms["interaction_fk_contact_map_negative"]
+    assert int(positive_term.denominator.item()) == positive
+    assert int(negative_term.denominator.item()) == total - positive
+    assert float(positive_term.raw) > 0.0
+    assert float(negative_term.raw) > 0.0
+
+
+def test_reaction_v5_1_transition_penalizes_shifted_onset_and_release() -> None:
+    target = _identity_interaction_motion(frames=4)
+    prediction = target.clone()
+    target[:, 1, :, ROOT_SLICE.start] = torch.tensor([3.0, 0.0, 0.0, 3.0])
+    prediction[:, 1, :, ROOT_SLICE.start] = torch.tensor([3.0, 3.0, 0.0, 0.0])
+    weights = _reaction_v5_1_contact_weights(
+        fk_contact_map_positive=0.0,
+        fk_contact_map_negative=0.0,
+        fk_contact_vector=0.0,
+    )
+    exact = compute_hy273_interaction_loss(
+        prediction_physical=target.clone(),
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    shifted = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    term = "interaction_fk_contact_transition"
+    assert float(exact.terms[term].raw) == 0.0
+    assert float(shifted.terms[term].raw) > 0.0
+
+
+def test_reaction_v5_1_full_contact_respects_fine_gate_and_padding() -> None:
+    target = _identity_interaction_motion(frames=2)
+    prediction = target.clone()
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.4
+    weights = _reaction_v5_1_contact_weights()
+    gated = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 2, dtype=torch.bool),
+        timesteps=torch.tensor([0.1]),
+        weights=weights,
+    )
+    assert float(gated.total) == 0.0
+
+    prediction[:, 1, 0] = target[:, 1, 0]
+    valid = torch.tensor([[[True, False], [True, False]]])
+    padded = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=valid,
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    assert float(padded.total) == 0.0
 
 
 def test_reaction_v4_layout_is_signed_3d_and_shared_yaw_invariant() -> None:
@@ -1404,6 +1614,73 @@ def test_reaction_v5_real_config_changes_only_reaction_loss() -> None:
     assert weights.first_contact_cdf == pytest.approx(0.003)
     assert v5_config["reaction_loss"]["low_t_fraction"] == pytest.approx(0.30)
     assert v5_config["reaction_loss"]["low_t_max"] == pytest.approx(0.15)
+
+
+def test_reaction_v5_1_real_config_only_adds_full_contact_loss() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    v5_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v5_event_layout.yaml"
+    )
+    v5_1_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v5_1_full_contact.yaml"
+    )
+    validate_config(v5_1_config)
+    assert {
+        name: section for name, section in v5_config.items() if name != "reaction_loss"
+    } == {
+        name: section for name, section in v5_1_config.items() if name != "reaction_loss"
+    }
+    added = set(v5_1_config["reaction_loss"]) - set(v5_config["reaction_loss"])
+    assert added == {
+        "fk_contact_map_positive",
+        "fk_contact_map_negative",
+        "fk_contact_vector",
+        "fk_contact_transition",
+        "fk_contact_threshold_m",
+        "fk_contact_temperature_m",
+        "fk_contact_vector_scale_m",
+        "fk_contact_transition_beta",
+    }
+    assert all(
+        v5_1_config["reaction_loss"][name] == value
+        for name, value in v5_config["reaction_loss"].items()
+    )
+    weights = make_interaction_weights(v5_1_config)
+    assert weights.fk_contact_map_positive == pytest.approx(0.001)
+    assert weights.fk_contact_map_negative == pytest.approx(0.005)
+    assert weights.fk_contact_vector == pytest.approx(0.002)
+    assert weights.fk_contact_transition == pytest.approx(0.003)
+
+
+def test_reaction_v5_config_disables_full_contact_without_changing_old_total() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    v5_config, _ = load_config(
+        repository / "configs/hy273_unified_fulltext_reaction_v5_event_layout.yaml"
+    )
+    weights = make_interaction_weights(v5_config)
+    target = _identity_interaction_motion(frames=3)
+    prediction = target.clone()
+    prediction[:, 1, :, ROOT_SLICE.start] = 0.4
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 3, dtype=torch.bool),
+        timesteps=torch.tensor([0.8]),
+        weights=weights,
+    )
+    new_names = {
+        "interaction_fk_contact_map_positive",
+        "interaction_fk_contact_map_negative",
+        "interaction_fk_contact_vector",
+        "interaction_fk_contact_transition",
+    }
+    assert all(bundle.terms[name].weight == 0.0 for name in new_names)
+    old_total = sum(
+        (term.weighted for name, term in bundle.terms.items() if name not in new_names),
+        prediction.sum() * 0.0,
+    )
+    torch.testing.assert_close(bundle.total, old_total, rtol=0.0, atol=0.0)
 
 
 def test_reaction_v4_same_mix_extension_to_250k_changes_only_horizon() -> None:

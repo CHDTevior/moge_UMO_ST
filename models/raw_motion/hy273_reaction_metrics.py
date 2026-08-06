@@ -18,6 +18,7 @@ from .hy273_slices import (
 
 INITIAL_LAYOUT_FRAMES = 15
 CONTACT_TIMING_THRESHOLD_M = 0.20
+FK_PAIR_CONTACT_THRESHOLD_M = 0.15
 
 
 def _batched(value: torch.Tensor, name: str) -> tuple[torch.Tensor, bool]:
@@ -122,6 +123,79 @@ def _close_event_statistics(
                 f"{close_prefix}_target_negative": target_negative,
             }
         )
+    return metrics, counts, sample_counts
+
+
+def _binary_event_statistics(
+    prediction_positive: torch.Tensor,
+    target_positive: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    event_prefix: str,
+    false_positive_name: str,
+    false_negative_name: str,
+) -> tuple[
+    dict[str, torch.Tensor],
+    dict[str, tuple[torch.Tensor, torch.Tensor]],
+    dict[str, torch.Tensor],
+]:
+    """Return per-sample and pooled-count statistics for a binary event map."""
+
+    if prediction_positive.shape != target_positive.shape:
+        raise ValueError("Binary prediction and target event maps differ")
+    expanded_valid = valid
+    while expanded_valid.ndim < prediction_positive.ndim:
+        expanded_valid = expanded_valid.unsqueeze(-1)
+    expanded_valid = expanded_valid.expand_as(prediction_positive)
+    reduce_dims = tuple(range(1, prediction_positive.ndim))
+    true_positive = (
+        prediction_positive & target_positive & expanded_valid
+    ).sum(dim=reduce_dims)
+    false_positive = (
+        prediction_positive & ~target_positive & expanded_valid
+    ).sum(dim=reduce_dims)
+    false_negative = (
+        ~prediction_positive & target_positive & expanded_valid
+    ).sum(dim=reduce_dims)
+    target_positive_count = (target_positive & expanded_valid).sum(dim=reduce_dims)
+    target_negative_count = (~target_positive & expanded_valid).sum(dim=reduce_dims)
+    metrics = {
+        f"{event_prefix}_precision": _safe_ratio(
+            true_positive, true_positive + false_positive
+        ),
+        f"{event_prefix}_recall": _safe_ratio(
+            true_positive, true_positive + false_negative
+        ),
+        f"{event_prefix}_f1": _safe_ratio(
+            2.0 * true_positive,
+            2.0 * true_positive + false_positive + false_negative,
+        ),
+        false_positive_name: _safe_ratio(false_positive, target_negative_count),
+        false_negative_name: _safe_ratio(false_negative, target_positive_count),
+    }
+    counts = {
+        f"{event_prefix}_precision": (
+            true_positive,
+            true_positive + false_positive,
+        ),
+        f"{event_prefix}_recall": (
+            true_positive,
+            true_positive + false_negative,
+        ),
+        f"{event_prefix}_f1": (
+            2.0 * true_positive,
+            2.0 * true_positive + false_positive + false_negative,
+        ),
+        false_positive_name: (false_positive, target_negative_count),
+        false_negative_name: (false_negative, target_positive_count),
+    }
+    sample_counts = {
+        f"{event_prefix}_tp": true_positive,
+        f"{event_prefix}_fp": false_positive,
+        f"{event_prefix}_fn": false_negative,
+        f"{event_prefix}_target_positive": target_positive_count,
+        f"{event_prefix}_target_negative": target_negative_count,
+    }
     return metrics, counts, sample_counts
 
 
@@ -334,6 +408,76 @@ def reaction_fixed_role_metrics(
     close_event_counts.update(fk_counts)
     close_event_sample_counts.update(fk_sample_counts)
 
+    fk_pair_prediction_contact = (
+        pred_fk_distance < FK_PAIR_CONTACT_THRESHOLD_M
+    )
+    fk_pair_target_contact = target_fk_distance < FK_PAIR_CONTACT_THRESHOLD_M
+    pair_metrics, pair_counts, pair_sample_counts = _binary_event_statistics(
+        fk_pair_prediction_contact,
+        fk_pair_target_contact,
+        valid,
+        event_prefix="fk_pair_close_15cm",
+        false_positive_name="fk_pair_false_close_rate_15cm",
+        false_negative_name="fk_pair_missed_close_rate_15cm",
+    )
+    # Onset and release are distinct lifecycle events. Keeping direction as an
+    # event axis prevents a predicted release from matching a target onset at
+    # the same pair and frame boundary.
+    fk_pair_prediction_transition = torch.stack(
+        (
+            ~fk_pair_prediction_contact[:, :-1]
+            & fk_pair_prediction_contact[:, 1:],
+            fk_pair_prediction_contact[:, :-1]
+            & ~fk_pair_prediction_contact[:, 1:],
+        ),
+        dim=-1,
+    )
+    fk_pair_target_transition = torch.stack(
+        (
+            ~fk_pair_target_contact[:, :-1] & fk_pair_target_contact[:, 1:],
+            fk_pair_target_contact[:, :-1] & ~fk_pair_target_contact[:, 1:],
+        ),
+        dim=-1,
+    )
+    pair_transition_valid = valid[:, 1:] & valid[:, :-1]
+    transition_metrics, transition_counts, transition_sample_counts = (
+        _binary_event_statistics(
+            fk_pair_prediction_transition,
+            fk_pair_target_transition,
+            pair_transition_valid,
+            event_prefix="fk_pair_transition_15cm",
+            false_positive_name="fk_pair_false_transition_rate_15cm",
+            false_negative_name="fk_pair_missed_transition_rate_15cm",
+        )
+    )
+    close_event_metrics.update(pair_metrics)
+    close_event_metrics.update(transition_metrics)
+    close_event_counts.update(pair_counts)
+    close_event_counts.update(transition_counts)
+    close_event_sample_counts.update(pair_sample_counts)
+    close_event_sample_counts.update(transition_sample_counts)
+
+    prediction_fk_pair_vector = (
+        source_fk[:, :, :, None, :] - prediction_fk[:, :, None, :, :]
+    )
+    target_fk_pair_vector = (
+        source_fk[:, :, :, None, :] - target_fk[:, :, None, :, :]
+    )
+    fk_contact_vector_error = torch.linalg.vector_norm(
+        prediction_fk_pair_vector - target_fk_pair_vector,
+        dim=-1,
+    )
+    fk_contact_vector_valid = valid[..., None, None] & fk_pair_target_contact
+    fk_contact_vector_error_sum_cm = (
+        fk_contact_vector_error
+        * fk_contact_vector_valid.to(dtype=fk_contact_vector_error.dtype)
+    ).sum(dim=(1, 2, 3)) * 100.0
+    fk_contact_vector_count = fk_contact_vector_valid.sum(dim=(1, 2, 3))
+    fk_contact_vector_error_cm = _safe_ratio(
+        fk_contact_vector_error_sum_cm,
+        fk_contact_vector_count,
+    )
+
     contact_probability = prediction[..., CONTACT_SLICE].clamp(0.0, 1.0)
     target_contact = target[..., CONTACT_SLICE] >= 0.5
     predicted_contact = contact_probability >= 0.5
@@ -432,6 +576,7 @@ def reaction_fixed_role_metrics(
         "prediction_to_source_position_mpjpe_cm": prediction_to_source * 100.0,
         "target_to_source_position_mpjpe_cm": target_to_source * 100.0,
         "prediction_position_fk_disagreement_cm": fk_consistency * 100.0,
+        "fk_contact_vector_error_cm_15cm": fk_contact_vector_error_cm,
     }
     metrics.update(close_event_metrics)
     per_sample: list[dict[str, float | int | str | None]] = []
@@ -455,10 +600,18 @@ def reaction_fixed_role_metrics(
         row["precontact_relative_heading_error_sum_deg"] = float(
             precontact_heading_error_sum_deg[index].item()
         )
+        row["fk_contact_vector_error_sum_cm_15cm"] = float(
+            fk_contact_vector_error_sum_cm[index].item()
+        )
+        row["fk_contact_vector_target_pairs_15cm"] = int(
+            fk_contact_vector_count[index].item()
+        )
         if int(precontact_frames[index].item()) == 0:
             row["precontact_relative_root_error_cm"] = None
             row["precontact_relative_heading_error_deg"] = None
             row["precontact_false_close_rate_20cm"] = None
+        if int(fk_contact_vector_count[index].item()) == 0:
+            row["fk_contact_vector_error_cm_15cm"] = None
         row.update(
             {
                 name: int(value[index].item())
@@ -501,6 +654,17 @@ def reaction_fixed_role_metrics(
             if int(total_denominator.item()) > 0
             else None
         )
+    total_fk_contact_pairs = fk_contact_vector_count.sum()
+    aggregate["fk_contact_vector_error_cm_15cm"] = (
+        float(
+            _safe_ratio(
+                fk_contact_vector_error_sum_cm.sum(),
+                total_fk_contact_pairs,
+            ).item()
+        )
+        if int(total_fk_contact_pairs.item()) > 0
+        else None
+    )
     return {
         "assignment_rule": "fixed_source_actor_to_target_reactor_no_swap",
         "aggregate": aggregate,

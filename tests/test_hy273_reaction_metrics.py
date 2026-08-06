@@ -115,6 +115,64 @@ def test_reaction_metrics_keep_position_and_fk_close_paths_separate() -> None:
     assert result["aggregate"]["target_fk_min_inter_actor_joint_cm"] > 90.0
 
 
+def test_reaction_metrics_report_fk_pair_contact_and_lifecycle() -> None:
+    source = _motion(frames=4)
+    target = _motion(frames=4)
+    exact = target.clone()
+    target[..., ROOT_SLICE.start] = torch.tensor([3.0, 0.0, 0.0, 3.0])
+    exact.copy_(target)
+
+    exact_result = reaction_fixed_role_metrics(source, exact, target)
+    exact_aggregate = exact_result["aggregate"]
+    assert exact_aggregate["fk_pair_close_15cm_f1"] == 1.0
+    assert exact_aggregate["fk_pair_transition_15cm_f1"] == 1.0
+    assert exact_aggregate["fk_contact_vector_error_cm_15cm"] == 0.0
+
+    shifted = _motion(frames=4)
+    shifted[..., ROOT_SLICE.start] = torch.tensor([3.0, 3.0, 0.0, 0.0])
+    shifted_result = reaction_fixed_role_metrics(source, shifted, target)
+    shifted_aggregate = shifted_result["aggregate"]
+    assert shifted_aggregate["fk_pair_close_15cm_f1"] < 1.0
+    assert shifted_aggregate["fk_pair_transition_15cm_f1"] < 1.0
+    assert shifted_aggregate["fk_contact_vector_error_cm_15cm"] > 0.0
+    row = shifted_result["per_sample"][0]
+    assert row["fk_pair_close_15cm_target_positive"] > 0
+    assert row["fk_pair_transition_15cm_target_positive"] > 0
+    assert row["fk_contact_vector_target_pairs_15cm"] > 0
+
+
+def test_reaction_metrics_do_not_match_release_to_onset() -> None:
+    source = _motion(frames=2)
+    target = _motion(frames=2)
+    prediction = _motion(frames=2)
+    target[..., ROOT_SLICE.start] = torch.tensor([3.0, 0.0])
+    prediction[..., ROOT_SLICE.start] = torch.tensor([0.0, 3.0])
+
+    result = reaction_fixed_role_metrics(source, prediction, target)
+    aggregate = result["aggregate"]
+    assert aggregate["fk_pair_transition_15cm_precision"] == 0.0
+    assert aggregate["fk_pair_transition_15cm_recall"] == 0.0
+    assert aggregate["fk_pair_transition_15cm_f1"] == 0.0
+
+
+def test_reaction_metrics_ignore_padded_fk_pair_contact_errors() -> None:
+    source = _motion(frames=3)
+    target = _motion(frames=3)
+    prediction = target.clone()
+    target[..., ROOT_SLICE.start] = 3.0
+    prediction.copy_(target)
+    prediction[:, 2, ROOT_SLICE.start] = 0.0
+    result = reaction_fixed_role_metrics(
+        source,
+        prediction,
+        target,
+        lengths=torch.tensor([2]),
+    )
+    assert result["aggregate"]["fk_pair_close_15cm_f1"] is None
+    assert result["aggregate"]["fk_pair_transition_15cm_f1"] is None
+    assert result["aggregate"]["fk_contact_vector_error_cm_15cm"] is None
+
+
 def test_reaction_metrics_report_initial_precontact_and_close_timing() -> None:
     source = _motion(frames=20)
     target = _motion(frames=20)
@@ -218,6 +276,42 @@ def test_reaction_eval_uses_micro_not_macro_close_precision() -> None:
         confidence=0.95,
     )
     assert abs(float(aggregate["close_20cm_precision"]["mean"]) - 0.2) < 1e-8
+
+
+def test_reaction_eval_micro_pools_fk_pair_events_and_contact_vectors() -> None:
+    rows = []
+    for tp, fp, vector_sum, vector_count in (
+        (1, 0, 10.0, 1),
+        (1, 8, 90.0, 9),
+    ):
+        row: dict[str, float | int] = {
+            "fk_pair_close_15cm_precision": float(tp / (tp + fp)),
+            "fk_pair_close_15cm_recall": 1.0,
+            "fk_pair_close_15cm_f1": float(2 * tp / (2 * tp + fp)),
+            "fk_pair_false_close_rate_15cm": float(fp / 10),
+            "fk_pair_missed_close_rate_15cm": 0.0,
+            "fk_pair_close_15cm_tp": tp,
+            "fk_pair_close_15cm_fp": fp,
+            "fk_pair_close_15cm_fn": 0,
+            "fk_pair_close_15cm_target_positive": tp,
+            "fk_pair_close_15cm_target_negative": 10,
+            "fk_contact_vector_error_cm_15cm": vector_sum / vector_count,
+            "fk_contact_vector_error_sum_cm_15cm": vector_sum,
+            "fk_contact_vector_target_pairs_15cm": vector_count,
+        }
+        rows.append(row)
+    aggregate = _aggregate_rows(
+        rows,
+        seed=19,
+        resamples=100,
+        confidence=0.95,
+    )
+    assert abs(
+        float(aggregate["fk_pair_close_15cm_precision"]["mean"]) - 0.2
+    ) < 1e-8
+    assert abs(
+        float(aggregate["fk_contact_vector_error_cm_15cm"]["mean"]) - 10.0
+    ) < 1e-8
 
 
 def test_reaction_eval_uses_micro_precontact_false_close_rate() -> None:

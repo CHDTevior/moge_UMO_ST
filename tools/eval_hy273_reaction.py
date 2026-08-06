@@ -106,6 +106,40 @@ MICRO_CLOSE_METRIC_NAMES = {
     for metric in ("false_close_rate", "missed_close_rate")
     for threshold in CLOSE_THRESHOLDS_CM
 }
+PAIR_EVENT_SPECS = (
+    (
+        "fk_pair_close_15cm",
+        "fk_pair_false_close_rate_15cm",
+        "fk_pair_missed_close_rate_15cm",
+    ),
+    (
+        "fk_pair_transition_15cm",
+        "fk_pair_false_transition_rate_15cm",
+        "fk_pair_missed_transition_rate_15cm",
+    ),
+)
+MICRO_PAIR_EVENT_METRIC_NAMES = {
+    name
+    for event_prefix, false_positive_name, false_negative_name in PAIR_EVENT_SPECS
+    for name in (
+        f"{event_prefix}_precision",
+        f"{event_prefix}_recall",
+        f"{event_prefix}_f1",
+        false_positive_name,
+        false_negative_name,
+    )
+}
+POOLED_FK_CONTACT_METRICS = {
+    "fk_contact_vector_error_cm_15cm": (
+        "fk_contact_vector_error_sum_cm_15cm",
+        "fk_contact_vector_target_pairs_15cm",
+    )
+}
+POOLED_FK_CONTACT_COMPONENT_FIELDS = {
+    field
+    for fields in POOLED_FK_CONTACT_METRICS.values()
+    for field in fields
+}
 POOLED_PRECONTACT_METRICS = {
     "precontact_false_close_rate_20cm": "precontact_false_close_frames_20cm",
     "precontact_relative_root_error_cm": "precontact_relative_root_error_sum_cm",
@@ -123,6 +157,13 @@ CAUSAL_ADVANTAGE_DIRECTIONS.update(
         for name in MICRO_CLOSE_METRIC_NAMES
     }
 )
+CAUSAL_ADVANTAGE_DIRECTIONS.update(
+    {
+        name: "higher" if name.endswith(("_precision", "_recall", "_f1")) else "lower"
+        for name in MICRO_PAIR_EVENT_METRIC_NAMES
+    }
+)
+CAUSAL_ADVANTAGE_DIRECTIONS["fk_contact_vector_error_cm_15cm"] = "lower"
 
 
 def _validate_final_protocol_runtime(
@@ -563,6 +604,50 @@ def _micro_close_event_metrics(
     return result
 
 
+def _micro_pair_event_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    seed: int,
+    resamples: int,
+    confidence: float,
+) -> dict[str, dict[str, float | int | None]]:
+    result: dict[str, dict[str, float | int | None]] = {}
+    offset = 0
+    for event_prefix, false_positive_name, false_negative_name in PAIR_EVENT_SPECS:
+        if f"{event_prefix}_tp" not in rows[0]:
+            continue
+
+        def counts(name: str) -> np.ndarray:
+            return np.asarray(
+                [int(row[f"{event_prefix}_{name}"]) for row in rows],
+                dtype=np.float64,
+            )
+
+        tp = counts("tp")
+        fp = counts("fp")
+        fn = counts("fn")
+        target_positive = counts("target_positive")
+        target_negative = counts("target_negative")
+        specifications = {
+            f"{event_prefix}_precision": (tp, tp + fp),
+            f"{event_prefix}_recall": (tp, tp + fn),
+            f"{event_prefix}_f1": (2.0 * tp, 2.0 * tp + fp + fn),
+            false_positive_name: (fp, target_negative),
+            false_negative_name: (fn, target_positive),
+        }
+        for name, (numerator, denominator) in specifications.items():
+            result[name] = _bootstrap_ratio(
+                numerator,
+                denominator,
+                seed=int(seed) + offset,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+            offset += 1
+    return result
+
+
 def _close_ratio_components(
     rows: list[dict[str, Any]], metric: str
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -590,6 +675,45 @@ def _close_ratio_components(
             if metric == f"{name_prefix}missed_close_rate_{threshold_cm}cm":
                 return counts("fn"), counts("target_positive")
     raise KeyError(f"Unsupported micro close metric: {metric}")
+
+
+def _pair_event_ratio_components(
+    rows: list[dict[str, Any]], metric: str
+) -> tuple[np.ndarray, np.ndarray]:
+    for event_prefix, false_positive_name, false_negative_name in PAIR_EVENT_SPECS:
+
+        def counts(name: str) -> np.ndarray:
+            return np.asarray(
+                [int(row[f"{event_prefix}_{name}"]) for row in rows],
+                dtype=np.float64,
+            )
+
+        if metric == f"{event_prefix}_precision":
+            tp, fp = counts("tp"), counts("fp")
+            return tp, tp + fp
+        if metric == f"{event_prefix}_recall":
+            tp, fn = counts("tp"), counts("fn")
+            return tp, tp + fn
+        if metric == f"{event_prefix}_f1":
+            tp, fp, fn = counts("tp"), counts("fp"), counts("fn")
+            return 2.0 * tp, 2.0 * tp + fp + fn
+        if metric == false_positive_name:
+            return counts("fp"), counts("target_negative")
+        if metric == false_negative_name:
+            return counts("fn"), counts("target_positive")
+    raise KeyError(f"Unsupported micro pair event metric: {metric}")
+
+
+def _fk_contact_ratio_components(
+    rows: list[dict[str, Any]], metric: str
+) -> tuple[np.ndarray, np.ndarray]:
+    if metric not in POOLED_FK_CONTACT_METRICS:
+        raise KeyError(f"Unsupported FK contact metric: {metric}")
+    numerator_field, denominator_field = POOLED_FK_CONTACT_METRICS[metric]
+    return (
+        np.asarray([float(row[numerator_field]) for row in rows], dtype=np.float64),
+        np.asarray([int(row[denominator_field]) for row in rows], dtype=np.float64),
+    )
 
 
 def _precontact_ratio_components(
@@ -719,8 +843,11 @@ def _aggregate_rows(
             isinstance(value, float)
             and np.isfinite(value)
             and key not in MICRO_CLOSE_METRIC_NAMES
+            and key not in MICRO_PAIR_EVENT_METRIC_NAMES
             and key not in MICRO_PRECONTACT_METRIC_NAMES
             and key not in PRECONTACT_COMPONENT_FIELDS
+            and key not in POOLED_FK_CONTACT_METRICS
+            and key not in POOLED_FK_CONTACT_COMPONENT_FIELDS
         )
     )
     result = {
@@ -740,6 +867,14 @@ def _aggregate_rows(
             confidence=confidence,
         )
     )
+    result.update(
+        _micro_pair_event_metrics(
+            rows,
+            seed=int(seed) + len(metric_names) + len(result),
+            resamples=resamples,
+            confidence=confidence,
+        )
+    )
     for offset, (metric, numerator_field) in enumerate(
         POOLED_PRECONTACT_METRICS.items()
     ):
@@ -748,6 +883,18 @@ def _aggregate_rows(
             "precontact_valid_frames_20cm",
         } <= rows[0].keys():
             numerator, denominator = _precontact_ratio_components(rows, metric)
+            result[metric] = _bootstrap_ratio(
+                numerator,
+                denominator,
+                seed=int(seed) + len(metric_names) + len(result) + offset,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+    for offset, metric in enumerate(POOLED_FK_CONTACT_METRICS):
+        numerator_field, denominator_field = POOLED_FK_CONTACT_METRICS[metric]
+        if {numerator_field, denominator_field} <= rows[0].keys():
+            numerator, denominator = _fk_contact_ratio_components(rows, metric)
             result[metric] = _bootstrap_ratio(
                 numerator,
                 denominator,
@@ -801,7 +948,9 @@ def _matched_advantage(
             (
                 isinstance(value, float)
                 or key in MICRO_CLOSE_METRIC_NAMES
+                or key in MICRO_PAIR_EVENT_METRIC_NAMES
                 or key in MICRO_PRECONTACT_METRIC_NAMES
+                or key in POOLED_FK_CONTACT_METRICS
             )
             and key in ablated[0]
             and key in CAUSAL_ADVANTAGE_DIRECTIONS
@@ -828,11 +977,47 @@ def _matched_advantage(
                 confidence=confidence,
                 undefined_as_none=True,
             )
+        elif metric in MICRO_PAIR_EVENT_METRIC_NAMES:
+            correct_numerator, correct_denominator = _pair_event_ratio_components(
+                correct, metric
+            )
+            ablated_numerator, ablated_denominator = _pair_event_ratio_components(
+                ablated, metric
+            )
+            statistics = _bootstrap_matched_ratio_advantage(
+                correct_numerator,
+                correct_denominator,
+                ablated_numerator,
+                ablated_denominator,
+                direction=direction,
+                seed=seed + index,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
         elif metric in MICRO_PRECONTACT_METRIC_NAMES:
             correct_numerator, correct_denominator = _precontact_ratio_components(
                 correct, metric
             )
             ablated_numerator, ablated_denominator = _precontact_ratio_components(
+                ablated, metric
+            )
+            statistics = _bootstrap_matched_ratio_advantage(
+                correct_numerator,
+                correct_denominator,
+                ablated_numerator,
+                ablated_denominator,
+                direction=direction,
+                seed=seed + index,
+                resamples=resamples,
+                confidence=confidence,
+                undefined_as_none=True,
+            )
+        elif metric in POOLED_FK_CONTACT_METRICS:
+            correct_numerator, correct_denominator = _fk_contact_ratio_components(
+                correct, metric
+            )
+            ablated_numerator, ablated_denominator = _fk_contact_ratio_components(
                 ablated, metric
             )
             statistics = _bootstrap_matched_ratio_advantage(

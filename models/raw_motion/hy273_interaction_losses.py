@@ -12,7 +12,9 @@ from .hy273_multitask_losses import RatioLossTerm
 from .hy273_slices import (
     DIM_HY273,
     HEADING_SLICE,
+    JOINT_POS_SLICE,
     ROOT_SLICE,
+    fk_positions_from_global_rot6d,
     reconstruct_global_joints_from_features,
     yaw_rotate_positions,
 )
@@ -33,6 +35,10 @@ class HY273InteractionLossWeights:
     scene_proximity: float = 0.0
     precontact_false_close: float = 0.0
     first_contact_cdf: float = 0.0
+    fk_contact_map_positive: float = 0.0
+    fk_contact_map_negative: float = 0.0
+    fk_contact_vector: float = 0.0
+    fk_contact_transition: float = 0.0
     root_scale_m: float = 0.25
     heading_beta: float = 1.0
     layout_initial_frames: int = 0
@@ -56,6 +62,10 @@ class HY273InteractionLossWeights:
     false_close_directional_strength: float = 0.025
     precontact_directional_strength: float = 0.25
     overlap_root_fallback_m: float = 1e-4
+    fk_contact_threshold_m: float = 0.15
+    fk_contact_temperature_m: float = 0.02
+    fk_contact_vector_scale_m: float = 0.05
+    fk_contact_transition_beta: float = 0.10
     distance_include_predicted_near: bool = False
     min_flow_t: float = 0.20
     coarse_min_flow_t: float | None = None
@@ -75,6 +85,10 @@ class HY273InteractionLossWeights:
             "scene_proximity",
             "precontact_false_close",
             "first_contact_cdf",
+            "fk_contact_map_positive",
+            "fk_contact_map_negative",
+            "fk_contact_vector",
+            "fk_contact_transition",
             "false_close_directional_strength",
             "precontact_directional_strength",
         ):
@@ -101,6 +115,10 @@ class HY273InteractionLossWeights:
             "false_close_margin_m",
             "false_close_gt_threshold_m",
             "overlap_root_fallback_m",
+            "fk_contact_threshold_m",
+            "fk_contact_temperature_m",
+            "fk_contact_vector_scale_m",
+            "fk_contact_transition_beta",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
@@ -506,6 +524,159 @@ def compute_hy273_interaction_loss(
         beta=1.0,
     )
 
+    # Full-contact lifecycle supervision follows the FK path used by rendering
+    # and headline Reaction metrics. Positive and negative pair-time entries are
+    # normalized independently because true 15cm contacts are extremely sparse.
+    fk_contact_enabled = any(
+        float(value) > 0.0
+        for value in (
+            weights.fk_contact_map_positive,
+            weights.fk_contact_map_negative,
+            weights.fk_contact_vector,
+            weights.fk_contact_transition,
+        )
+    )
+    if fk_contact_enabled:
+        pred_fk_joints = fk_positions_from_global_rot6d(
+            prediction.reshape(batch * 2, frames, DIM_HY273)
+        ).reshape(batch, 2, frames, joints, 3)
+        target_fk_joints = fk_positions_from_global_rot6d(
+            target.reshape(batch * 2, frames, DIM_HY273)
+        ).reshape(batch, 2, frames, joints, 3).detach()
+        pred_fk_vector = (
+            pred_fk_joints[:, 0, :, :, None, :]
+            - pred_fk_joints[:, 1, :, None, :, :]
+        )
+        target_fk_vector = (
+            target_fk_joints[:, 0, :, :, None, :]
+            - target_fk_joints[:, 1, :, None, :, :]
+        )
+        pred_fk_distance = torch.linalg.vector_norm(pred_fk_vector, dim=-1)
+        target_fk_distance = torch.linalg.vector_norm(
+            target_fk_vector, dim=-1
+        ).detach()
+        fk_contact_threshold = float(weights.fk_contact_threshold_m)
+        fk_contact_temperature = float(weights.fk_contact_temperature_m)
+        # A Euclidean norm has no separation direction at exact overlap. For
+        # GT-negative pairs only, preserve the true forward distance while
+        # routing the overlap gradient through the reactor root along the GT
+        # pair direction. Normal non-overlap gradients remain unchanged.
+        target_fk_direction = target_fk_vector / target_fk_distance.clamp_min(
+            1e-6
+        ).unsqueeze(-1)
+        # FK translation is carried by smooth-root XZ and pelvis-position Y.
+        # Route overlap separation through those channels, avoiding unrelated
+        # local-joint deformation and the FK-inert smooth-root Y channel.
+        pred_fk_root_carrier = torch.stack(
+            (
+                prediction[..., ROOT_SLICE.start],
+                prediction[..., JOINT_POS_SLICE.start + 1],
+                prediction[..., ROOT_SLICE.start + 2],
+            ),
+            dim=-1,
+        )
+        pred_root_pair_vector = (
+            pred_fk_root_carrier[:, 0].detach() - pred_fk_root_carrier[:, 1]
+        )
+        root_target_separation = (
+            pred_root_pair_vector[..., None, None, :] * target_fk_direction
+        ).sum(dim=-1)
+        root_distance_surrogate = (
+            pred_fk_distance.detach()
+            + root_target_separation
+            - root_target_separation.detach()
+        )
+        fk_overlap_negative = (
+            pred_fk_distance.detach() < float(weights.overlap_root_fallback_m)
+        ) & (target_fk_distance >= fk_contact_threshold)
+        pred_fk_distance = torch.where(
+            fk_overlap_negative,
+            root_distance_surrogate,
+            pred_fk_distance,
+        )
+        pred_fk_contact_logits = (
+            fk_contact_threshold - pred_fk_distance
+        ) / fk_contact_temperature
+        target_fk_contact_logits = (
+            fk_contact_threshold - target_fk_distance
+        ) / fk_contact_temperature
+        fk_contact_map_values = _bernoulli_kl_from_logits(
+            pred_fk_contact_logits,
+            target_fk_contact_logits,
+        )
+        target_fk_contact = target_fk_distance < fk_contact_threshold
+        predicted_fk_contact = (
+            pred_fk_distance.detach() < fk_contact_threshold
+        )
+        fk_contact_positive_mask = (
+            fine_valid[..., None, None] & target_fk_contact
+        )
+        fk_contact_negative_mask = (
+            fine_valid[..., None, None] & ~target_fk_contact
+        )
+        fk_predicted_contact_mask = (
+            fine_valid[..., None, None] & predicted_fk_contact
+        )
+
+        pred_fk_vector_local = _vectors_in_source_heading_frame(
+            pred_fk_vector, close_source_heading
+        )
+        target_fk_vector_local = _vectors_in_source_heading_frame(
+            target_fk_vector, close_source_heading
+        ).detach()
+        fk_contact_vector_values = F.smooth_l1_loss(
+            (pred_fk_vector_local - target_fk_vector_local)
+            / float(weights.fk_contact_vector_scale_m),
+            torch.zeros_like(pred_fk_vector_local),
+            reduction="none",
+            beta=1.0,
+        )
+
+        pred_fk_contact_probability = torch.sigmoid(pred_fk_contact_logits)
+        target_fk_contact_probability = torch.sigmoid(
+            target_fk_contact_logits
+        ).detach()
+        pred_fk_contact_delta = (
+            pred_fk_contact_probability[:, 1:]
+            - pred_fk_contact_probability[:, :-1]
+        )
+        target_fk_contact_delta = (
+            target_fk_contact_probability[:, 1:]
+            - target_fk_contact_probability[:, :-1]
+        )
+        fk_contact_transition_values = F.smooth_l1_loss(
+            pred_fk_contact_delta,
+            target_fk_contact_delta,
+            reduction="none",
+            beta=float(weights.fk_contact_transition_beta),
+        )
+        fk_transition_valid = fine_valid[:, 1:] & fine_valid[:, :-1]
+        fk_transition_context = (
+            target_fk_contact[:, 1:]
+            | target_fk_contact[:, :-1]
+            | predicted_fk_contact[:, 1:]
+            | predicted_fk_contact[:, :-1]
+        )
+        fk_contact_transition_mask = (
+            fk_transition_valid[..., None, None] & fk_transition_context
+        )
+    else:
+        fk_contact_map_values = pred_distance * 0.0
+        fk_contact_vector_values = pred_vector * 0.0
+        fk_contact_transition_values = pred_distance[:, 1:] * 0.0
+        fk_contact_positive_mask = torch.zeros_like(
+            pred_distance, dtype=torch.bool
+        )
+        fk_contact_negative_mask = torch.zeros_like(
+            pred_distance, dtype=torch.bool
+        )
+        fk_predicted_contact_mask = torch.zeros_like(
+            pred_distance, dtype=torch.bool
+        )
+        fk_contact_transition_mask = torch.zeros_like(
+            pred_distance[:, 1:], dtype=torch.bool
+        )
+
     # Event-level objectives use the same 20 cm scene definition as evaluation.
     # Unlike the 22x22 pair losses, these terms cannot be diluted by hundreds of
     # easy far-apart joint pairs.  They use the coarse gate so low-t samples must
@@ -760,6 +931,30 @@ def compute_hy273_interaction_loss(
             coarse_valid,
             weights.first_contact_cdf,
         ),
+        "interaction_fk_contact_map_positive": _ratio(
+            "interaction_fk_contact_map_positive",
+            fk_contact_map_values,
+            fk_contact_positive_mask,
+            weights.fk_contact_map_positive,
+        ),
+        "interaction_fk_contact_map_negative": _ratio(
+            "interaction_fk_contact_map_negative",
+            fk_contact_map_values,
+            fk_contact_negative_mask,
+            weights.fk_contact_map_negative,
+        ),
+        "interaction_fk_contact_vector": _ratio(
+            "interaction_fk_contact_vector",
+            fk_contact_vector_values,
+            fk_contact_positive_mask,
+            weights.fk_contact_vector,
+        ),
+        "interaction_fk_contact_transition": _ratio(
+            "interaction_fk_contact_transition",
+            fk_contact_transition_values,
+            fk_contact_transition_mask,
+            weights.fk_contact_transition,
+        ),
     }
     zero = prediction.sum() * 0.0
     total = sum((term.weighted for term in terms.values()), zero)
@@ -821,6 +1016,21 @@ def compute_hy273_interaction_loss(
         "first_contact_cdf_positive_frame_fraction": (
             (target_first_contact_hard_cdf & coarse_valid).sum().float(),
             coarse_valid.sum().float(),
+        ),
+        "fk_contact_positive_pair_fraction": (
+            fk_contact_positive_mask.sum().float(),
+            pair_entries,
+        ),
+        "fk_contact_predicted_positive_pair_fraction": (
+            fk_predicted_contact_mask.sum().float(),
+            pair_entries,
+        ),
+        "fk_contact_transition_pair_fraction": (
+            fk_contact_transition_mask.sum().float(),
+            (
+                (fine_valid[:, 1:] & fine_valid[:, :-1]).sum().float()
+                * float(joints * joints)
+            ),
         ),
     }
     return HY273InteractionLossBundle(

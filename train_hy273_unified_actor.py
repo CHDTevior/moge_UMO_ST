@@ -96,6 +96,11 @@ REACTION_GRADIENT_COMPONENTS = (
     "precontact_event",
     "first_contact_event",
     "event_timing",
+    "fk_contact_map_positive",
+    "fk_contact_map_negative",
+    "fk_contact_vector",
+    "fk_contact_transition",
+    "full_contact_lifecycle",
     "remaining_relation",
 )
 
@@ -584,6 +589,16 @@ def make_interaction_weights(
             section.get("precontact_false_close", 0.0)
         ),
         first_contact_cdf=float(section.get("first_contact_cdf", 0.0)),
+        fk_contact_map_positive=float(
+            section.get("fk_contact_map_positive", 0.0)
+        ),
+        fk_contact_map_negative=float(
+            section.get("fk_contact_map_negative", 0.0)
+        ),
+        fk_contact_vector=float(section.get("fk_contact_vector", 0.0)),
+        fk_contact_transition=float(
+            section.get("fk_contact_transition", 0.0)
+        ),
         root_scale_m=float(section["root_scale_m"]),
         heading_beta=float(section.get("heading_beta", 1.0)),
         layout_initial_frames=int(section.get("layout_initial_frames", 0)),
@@ -636,6 +651,18 @@ def make_interaction_weights(
         ),
         overlap_root_fallback_m=float(
             section.get("overlap_root_fallback_m", 1e-4)
+        ),
+        fk_contact_threshold_m=float(
+            section.get("fk_contact_threshold_m", 0.15)
+        ),
+        fk_contact_temperature_m=float(
+            section.get("fk_contact_temperature_m", 0.02)
+        ),
+        fk_contact_vector_scale_m=float(
+            section.get("fk_contact_vector_scale_m", 0.05)
+        ),
+        fk_contact_transition_beta=float(
+            section.get("fk_contact_transition_beta", 0.10)
         ),
         distance_include_predicted_near=bool(
             section.get("distance_include_predicted_near", False)
@@ -1867,6 +1894,32 @@ def main() -> None:
                         first_contact_event_loss = interaction_bundle.terms[
                             "interaction_first_contact_cdf"
                         ].weighted
+                        full_contact_term_names = {
+                            "fk_contact_map_positive": (
+                                "interaction_fk_contact_map_positive"
+                            ),
+                            "fk_contact_map_negative": (
+                                "interaction_fk_contact_map_negative"
+                            ),
+                            "fk_contact_vector": "interaction_fk_contact_vector",
+                            "fk_contact_transition": (
+                                "interaction_fk_contact_transition"
+                            ),
+                        }
+                        full_contact_component_output_grads = {
+                            metric_name: torch.autograd.grad(
+                                interaction_bundle.terms[term_name].weighted,
+                                prediction,
+                                retain_graph=True,
+                            )[0]
+                            for metric_name, term_name in (
+                                full_contact_term_names.items()
+                            )
+                        }
+                        full_contact_lifecycle_output_grad = sum(
+                            full_contact_component_output_grads.values(),
+                            torch.zeros_like(prediction),
+                        )
                         true_layout_output_grad = torch.autograd.grad(
                             true_layout_loss,
                             prediction,
@@ -1904,6 +1957,7 @@ def main() -> None:
                             - legacy_layout_output_grad
                             - true_layout_output_grad
                             - event_timing_output_grad
+                            - full_contact_lifecycle_output_grad
                         )
                         base_output_grad_rms = _masked_gradient_rms(
                             base_output_grad, length_mask
@@ -1912,7 +1966,7 @@ def main() -> None:
                             relation_output_grad, length_mask
                         )
                         relation_gradient_metrics = {}
-                        for metric_name, output_grad in (
+                        gradient_components = (
                             ("adaptive_distance", adaptive_output_grad),
                             ("close_vector", close_vector_output_grad),
                             ("fine_geometry", fine_geometry_output_grad),
@@ -1924,9 +1978,14 @@ def main() -> None:
                             ("precontact_event", precontact_event_output_grad),
                             ("first_contact_event", first_contact_event_output_grad),
                             ("event_timing", event_timing_output_grad),
+                            (
+                                "full_contact_lifecycle",
+                                full_contact_lifecycle_output_grad,
+                            ),
                             ("remaining_relation", remaining_output_grad),
                             ("relation", relation_output_grad),
-                        ):
+                        ) + tuple(full_contact_component_output_grads.items())
+                        for metric_name, output_grad in gradient_components:
                             relation_gradient_metrics[
                                 f"{metric_name}_output_grad_rms"
                             ] = _masked_gradient_rms(output_grad, length_mask)
