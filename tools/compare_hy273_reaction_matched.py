@@ -885,13 +885,21 @@ def _validate_training_contract(
         "deterministic_batcher_state_matched": (
             mode != "same_run_dose_extension"
         ),
+        "parent_lineage_status": (
+            "not_revalidated_for_same_run_dose_comparison"
+            if mode == "same_run_dose_extension"
+            else "external_launch_record_required"
+        ),
+        "parent_lineage_verified_by_comparator": False,
         "parent_lineage_note": (
-            "Both checkpoints carry one run name and exact replayed data-stream "
-            "continuity."
+            "The comparator verifies matching run metadata and exact saved data-stream "
+            "continuity. It does not prove model/EMA/optimizer resume ancestry or "
+            "revalidate the run's original parent checkpoint."
             if mode == "same_run_dose_extension"
             else (
-                "Both legacy runs were launched from the protocol-locked 100K "
-                "parent; the child checkpoint format does not embed its resume path."
+                "The child checkpoint format does not embed its resume path. A "
+                "shared parent must therefore be established from external launch "
+                "records, not inferred by this comparator."
             )
         ),
     }
@@ -906,6 +914,8 @@ def _validate_training_contract(
                 ),
                 "additional_task_updates": exposure_delta,
                 "same_data_and_batcher_static_contract": True,
+                "same_run_metadata_and_stream_continuity_verified": True,
+                "checkpoint_resume_lineage_verified_by_comparator": False,
                 "data_stream_continuity": stream_continuity,
                 "causal_scope": (
                     "Effect of additional same-recipe training; not an isolated "

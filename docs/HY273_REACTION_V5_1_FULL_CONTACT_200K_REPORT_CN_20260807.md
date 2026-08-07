@@ -8,7 +8,7 @@ Reaction-v5.1 是相对 Reaction-v5 的单变量 loss-family 实验：保持数�
 
 - 预注册主要指标没有显著改善。FK pair-contact F1 从 `0.11818` 到 `0.12138`，差值 `+0.00320`，95% CI `[-0.00567, 0.01218]`；contact-vector error 从 `32.56 cm` 到 `31.87 cm`，差值 `-0.69 cm`，95% CI `[-1.50, 0.09]`；transition F1 从 `0.00735` 到 `0.00712`，差值 `-0.00023`，95% CI `[-0.00168, 0.00121]`。
 - 初始布局出现了探索性的正向 signal。frame-0 relative-root error 下降 `2.07 cm`，initial-15f relative-root error 下降 `2.01 cm`，initial-15f relative-heading error 下降 `1.54 deg`，三项未经多重比较校正的 pointwise 95% CI 均不跨 0。
-- Reaction 的 GT jerk fidelity 显著变差：`||jerk(pred)-jerk(GT)||` 从 `92.46` 上升到 `93.61 m/s^3`，差值 `+1.16`，95% CI `[0.62, 1.71]`。预测 FK jerk magnitude 也从 `55.80` 上升到 `57.38 m/s^3`，差值 `+1.58`，95% CI `[0.89, 2.28]`；后者表示高阶时间变化增大，但不能单独等同于主观抖动。
+- Reaction 的 GT jerk fidelity 显著变差：`||jerk(pred)-jerk(GT)||` 从 `92.46` 上升到 `93.61 m/s^3`，差值 `+1.16`，95% CI `[0.62, 1.71]`。预测 FK jerk magnitude 也从 `55.80` 上升到 `57.38 m/s^3`，差值 `+1.58`，95% CI `[0.87, 2.27]`；后者表示高阶时间变化增大，但不能单独等同于主观抖动。
 - 全局 FK MPJPE 和 relation-distance MAE 仅小幅改善，95% CI 均跨 0，不能据此声称整体几何显著提升。
 - T2M 描述性 guardrail 未见灾难性退化，但没有预注册 non-inferiority margin，不能作正式“保持”结论；Edit 的平均几何误差、prediction jerk magnitude 和 foot-skate 相对 v5 改善，但聚合 target error 仍明显差于 source-copy/source-only，因此 Edit 仍不能用普通 target MSE 宣称成功。
 
@@ -53,6 +53,14 @@ model/step_00200000.pt
 - EMA、LR、optimizer、normalizer、数据、随机种子与 v5 相同。
 - Control/ease：关闭。
 
+共同 parent 由外部真实启动记录核实，而不是由 child checkpoint 自证：
+
+- Codex rollout `rollout-2026-07-23T05-10-28-019f8baa-6662-7903-8320-087d4ae139d7.jsonl:165646` 记录了 v5 在 `2026-08-05T05:42:17.774Z` 的启动命令；命令只覆盖 `RUN_NAME/STOP_STEP/GPU_IDS/MASTER_PORT`，没有覆盖 `CHECKPOINT/PARENT_CHECKPOINT`。
+- 同一 rollout 的 `:170095` 记录了 v5.1 在 `2026-08-06T09:50:43.895Z` 的启动命令；命令只覆盖 `RUN_NAME/MASTER_PORT`，同样没有覆盖 parent。
+- 两个 launcher 的默认值都解析到 `/mnt/afs/mogeflow-control/outputs/hy273_unified_reaction/hy273_unified_fulltext_reaction_v1_20260801_0315/model/step_00100000.pt`。
+
+当前 child checkpoint 没有保存 resume path，因此 matched comparator 只能验证 checkpoint 配置、RNG 和最终 batcher state；它不能独立验证共同 parent。机器结果相应标记为 `parent_lineage_status=external_launch_record_required`。
+
 checkpoint 中的 deterministic task scheduler state 在 200K 为：
 
 ```text
@@ -63,7 +71,7 @@ next global step          200000
 task debts                     0
 ```
 
-因此 v5 与 v5.1 的 matched comparison 不存在任务曝光比例或 resume 边界差异。
+因此 v5 与 v5.1 的最终任务曝光和数据游标一致。需要保留一个实际差异：v5 在 150K 为评估主动停止，并从 `step_00150000.pt` 续到 200K；v5.1 没有这次相同的运行边界。该 resume 没有改变最终 scheduler debt、realized task counts 或 stream cursor，但不能写成“两边没有 resume 边界差异”。
 
 ## 3. v5.1 改了什么
 
@@ -74,9 +82,11 @@ v5.1 保留 v5 的 low-t layout、source-local radius/bearing、partner-facing�
 | FK contact-map positive | 0.001 | 在 GT `<15 cm` joint-pair 上提高接触召回 |
 | FK contact-map negative | 0.005 | 抑制 GT 非接触 joint-pair 的错误接触 |
 | FK contact vector | 0.002 | 在 GT 接触 pair 上精修 FK 相对向量 |
-| FK contact transition | 0.003 | 监督 onset/hold/release 的相邻帧变化 |
+| FK contact transition | 0.003 | 监督相邻帧接触概率变化，直接对应 onset/release；hold 的绝对接触水平由 map 项锚定 |
 
 这些项使用 `[B,T,22,22]` joint-pair contact map 和 `[B,T,22,22,3]` pair vector，仅参与训练 loss，不进入模型输入，不增加推理计算或模型参数。
+
+四项都服从 `fine_min_flow_t=0.20`。训练日志中 `fine_active_scene_fraction` 在 100K-300K 的 10,000 条记录上均值为 `0.51075`，即约 `51.1%` 的 Reaction scene/update 激活这些 fine 项，并非全量 scene 都激活。transition 项比较的是相邻帧 soft contact probability 的差分；它不单独约束 hold 段的概率绝对值。
 
 需要保留两个解释边界：
 
@@ -102,18 +112,20 @@ eval_v5_1_200k_final/reaction/test/reaction_test.json
 eval_v5_1_200k_final/reaction/test/matched_v5_vs_v5_1_200000.json
 eval_v5_1_200k_final/t2m/full_test4042_ema_cfg2/summary.json
 eval_v5_1_200k_final/edit/full_test1013_ema_sourcecfg2_editcfg3/summary.json
+eval_v5_1_200k_final/guardrails/matched_t2m_edit_v5_vs_v5_1_200k.json
 ```
 
 ## 5. Reaction 结果
 
 ### 5.1 150K Val 早期门
 
-150K 在 522 条 Val 上没有出现主要 contact 收益，而且两个朝向指标显著变差：
+150K 在 522 条 Val 上没有出现主要 contact 收益，而且三个朝向指标显著变差：
 
 | 指标 | v5 150K | v5.1 150K | v5.1-v5 | 95% CI |
 |---|---:|---:|---:|---:|
 | FK MPJPE | 53.30 cm | 53.78 cm | +0.48 cm | [-0.67, 1.61] |
 | FK relation MAE | 22.50 cm | 22.58 cm | +0.08 cm | [-0.45, 0.61] |
+| Overall relative heading | 41.26 deg | 42.96 deg | +1.70 deg | [0.45, 2.97] |
 | Initial-15f heading | 42.90 deg | 45.15 deg | +2.25 deg | [0.51, 4.00] |
 | Partner-facing | 31.22 deg | 32.92 deg | +1.69 deg | [0.58, 2.91] |
 | FK pair-contact F1 | 0.09408 | 0.09111 | -0.00297 | [-0.01843, 0.01275] |
@@ -137,7 +149,9 @@ eval_v5_1_200k_final/edit/full_test1013_ema_sourcecfg2_editcfg3/summary.json
 | FK relation MAE | 20.47 cm | 20.40 cm | -0.07 cm | [-0.35, 0.21] | 未显著 |
 | Partner-facing | 29.92 deg | 29.77 deg | -0.15 deg | [-0.86, 0.55] | 未显著 |
 | FK jerk fidelity error | 92.46 | 93.61 | +1.16 | [0.62, 1.71] | 显著变差 |
-| Prediction FK jerk magnitude | 55.80 | 57.38 | +1.58 | [0.89, 2.28] | 显著增加 |
+| Prediction FK jerk magnitude | 55.80 | 57.38 | +1.58 | [0.87, 2.27] | 显著增加 |
+
+这里的 frame-0/initial-15f/pre-contact relative-root 与 relative-heading 都在 prediction 和 GT 两侧使用同一个 observed source。其残差在代数上等价于共享 source gauge 下的 reactor target fidelity，不能把它们单独解释成独立的跨人关系建模收益；radius、bearing、partner-facing 和跨人 joint-distance/contact 指标才提供额外的非线性关系证据。
 
 ### 5.3 主要 contact lifecycle 指标
 
@@ -177,7 +191,7 @@ HumanML3D Test 4,042 条，EMA，ODE32，text CFG=2.0：
 | FK jerk | 53.64 | 53.91 | +0.26 |
 | Foot-skate ratio | 0.2046 | 0.2063 | +0.0017 |
 
-这些逐样本同 seed 对比均为小幅混合波动，R@1/R@2/R@3、FK jerk 和 foot-skate 的 paired 95% CI 均跨 0。描述性 guardrail 未见灾难性遗忘；由于没有预注册非劣界，这不构成正式 non-inferiority 结论，FID 也只作同协议点估计参考。
+matched guardrail 已核对 4,042 条 case key、长度、seed 和 GT reference identity。R@1/R@2/R@3、FK jerk 和 foot-skate 的 paired 95% CI 均跨 0。描述性 guardrail 未见灾难性遗忘；由于没有预注册非劣界，这不构成正式 non-inferiority 结论，FID 也只作同协议点估计参考。
 
 ## 7. Edit 描述性守门
 
@@ -185,9 +199,9 @@ MotionFix Test 1,013 对，EMA，ODE32，source CFG=2.0，Edit CFG=3.0：
 
 | 正确 source+instruction 分支 | v5 200K | v5.1 200K | 变化 | Paired 95% CI |
 |---|---:|---:|---:|---:|
-| Target joint error | 51.83 cm | 48.03 cm | -3.80 cm | [-5.44, -2.23] |
-| Target rotation error | 49.26 deg | 46.70 deg | -2.56 deg | [-3.20, -1.90] |
-| Prediction jerk magnitude | 197.37 | 139.94 | -57.43 | [-114.55, -25.55] |
+| Target joint error | 51.83 cm | 48.03 cm | -3.80 cm | [-5.42, -2.22] |
+| Target rotation error | 49.26 deg | 46.70 deg | -2.56 deg | [-3.18, -1.91] |
+| Prediction jerk magnitude | 197.37 | 139.94 | -57.43 | [-114.73, -25.55] |
 | Foot-skate ratio | 0.3019 | 0.2744 | -0.0275 | [-0.0352, -0.0199] |
 
 source 与 instruction 各自仍有条件贡献：
@@ -195,7 +209,7 @@ source 与 instruction 各自仍有条件贡献：
 - shuffled-source/correct-instruction 的 target position degradation 为 `+4.18 cm`，95% CI `[0.60, 7.63]`，衡量正确 source 的贡献。
 - same-source/shuffled-instruction 的 target position degradation 为 `+4.61 cm`，95% CI `[1.00, 8.17]`，衡量正确 instruction 的贡献。
 
-但需要避免错误解释：MotionFix target 与 source 高度相似，source-copy 的平均 target joint error 只有 `23.21 cm`，source-only 为 `24.05 cm`，仍显著低于正确编辑分支的 `48.03 cm`。普通 aggregate target MSE 奖励复制 source，不能作为 Edit 语义成功的主指标。当前能支持的结论仅是：v5.1 没有破坏 Edit 条件敏感性，并在 v5 CFG=3 的四项描述性指标上改善；语义编辑成功仍需视觉与 instruction-specific 指标确认。
+matched guardrail 已逐 pair/system 核对 1,013 对的 instruction、source/target、长度、seed、gauge 和采样协议，并验证 checkpoint-independent source-copy 分支逐案不变。仍需避免错误解释：MotionFix target 与 source 高度相似，source-copy 的平均 target joint error 只有 `23.21 cm`，source-only 为 `24.05 cm`，仍显著低于正确编辑分支的 `48.03 cm`。普通 aggregate target MSE 奖励复制 source，不能作为 Edit 语义成功的主指标。当前能支持的结论仅是：v5.1 没有破坏 Edit 条件敏感性，并在 v5 CFG=3 的四项描述性指标上改善；语义编辑成功仍需视觉与 instruction-specific 指标确认。
 
 ## 8. 可视化
 

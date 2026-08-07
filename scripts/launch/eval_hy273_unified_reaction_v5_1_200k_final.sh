@@ -16,6 +16,8 @@ PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/mogo/bin/python}"
 BASELINE_ROOT="${BASELINE_ROOT:-/mnt/afs/mogeflow-control/outputs/hy273_unified_reaction_v5_event_layout/hy273_unified_reaction_v5_event_layout_20260805_1345}"
 BASELINE_REPORT="${BASELINE_REPORT:-${BASELINE_ROOT}/eval_v5_200k_final/reaction/test/reaction_test.json}"
 BASELINE_PREDICTIONS="${BASELINE_PREDICTIONS:-${BASELINE_ROOT}/eval_v5_200k_final/reaction/test/predictions}"
+BASELINE_T2M_SUMMARY="${BASELINE_T2M_SUMMARY:-${BASELINE_ROOT}/eval_v5_200k_final/t2m/full_test4042_ema_cfg2/summary.json}"
+BASELINE_EDIT_SUMMARY="${BASELINE_EDIT_SUMMARY:-${BASELINE_ROOT}/eval_v5_200k_final/edit/full_test1013_ema_sourcecfg2_editcfg3/summary.json}"
 
 for path in "${CHECKPOINT}" "${PARENT_CHECKPOINT}" "${BASELINE_REPORT}"; do
   [[ -f "${path}" ]] || {
@@ -42,6 +44,20 @@ EVAL_PHASE=all \
 
 CANDIDATE_REPORT="${EVAL_ROOT}/reaction/test/reaction_test.json"
 CANDIDATE_PREDICTIONS="${EVAL_ROOT}/reaction/test/predictions"
+CANDIDATE_T2M_SUMMARY="${EVAL_ROOT}/t2m/full_test4042_ema_cfg2/summary.json"
+CANDIDATE_EDIT_SUMMARY="${EVAL_ROOT}/edit/full_test1013_ema_sourcecfg2_editcfg3/summary.json"
+for path in \
+  "${CANDIDATE_REPORT}" \
+  "${BASELINE_T2M_SUMMARY}" \
+  "${CANDIDATE_T2M_SUMMARY}" \
+  "${BASELINE_EDIT_SUMMARY}" \
+  "${CANDIDATE_EDIT_SUMMARY}"; do
+  [[ -f "${path}" ]] || {
+    echo "Missing required matched-evaluation input: ${path}" >&2
+    exit 2
+  }
+done
+mkdir -p "${EVAL_ROOT}/guardrails"
 CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_reaction_matched.py \
   --baseline "${BASELINE_REPORT}" \
   --candidate "${CANDIDATE_REPORT}" \
@@ -56,6 +72,18 @@ CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_reaction_matched.py 
   --seed 20260806 \
   --output "${EVAL_ROOT}/reaction/test/matched_v5_vs_v5_1_200000.json" \
   >"${EVAL_ROOT}/logs/matched_v5_vs_v5_1_test.log" 2>&1
+
+CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_t2m_edit_guardrails.py \
+  --baseline_t2m "${BASELINE_T2M_SUMMARY}" \
+  --candidate_t2m "${CANDIDATE_T2M_SUMMARY}" \
+  --baseline_edit "${BASELINE_EDIT_SUMMARY}" \
+  --candidate_edit "${CANDIDATE_EDIT_SUMMARY}" \
+  --baseline_label reaction_v5_200000 \
+  --candidate_label reaction_v5_1_200000 \
+  --bootstrap_resamples 10000 \
+  --seed 20260806 \
+  --output "${EVAL_ROOT}/guardrails/matched_t2m_edit_v5_vs_v5_1_200k.json" \
+  >"${EVAL_ROOT}/logs/matched_t2m_edit_v5_vs_v5_1_200k.log" 2>&1
 
 CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/render_hy273_reaction_review.py \
   --report_json "${CANDIDATE_REPORT}" \

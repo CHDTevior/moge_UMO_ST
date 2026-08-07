@@ -11,9 +11,14 @@ PARENT_CHECKPOINT="${PARENT_CHECKPOINT:-/mnt/afs/mogeflow-control/outputs/hy273_
 BASELINE_CHECKPOINT="${BASELINE_CHECKPOINT:-${RUN_ROOT}/model/step_00200000.pt}"
 CANDIDATE_CHECKPOINT="${CANDIDATE_CHECKPOINT:-${RUN_ROOT}/model/step_00300000.pt}"
 BASELINE_EVAL_ROOT="${BASELINE_EVAL_ROOT:-${RUN_ROOT}/eval_v5_1_200k_final}"
+BASELINE_EDIT_CFG2_ROOT="${BASELINE_EDIT_CFG2_ROOT:-${RUN_ROOT}/eval_v5_1_200k_editcfg2_matched}"
 EVAL_ROOT="${EVAL_ROOT:-${RUN_ROOT}/eval_v5_1_300k_final}"
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/mogo/bin/python}"
+EVAL_PHASE="${EVAL_PHASE:-all}"
+T2M_SHARDS="${T2M_SHARDS:-7}"
+EDIT_SHARDS="${EDIT_SHARDS:-7}"
+BASELINE_EDIT_SUMMARY="${BASELINE_EDIT_CFG2_ROOT}/edit/full_test1013_ema_sourcecfg2_editcfg2/summary.json"
 
 for path in \
   "${PARENT_CHECKPOINT}" \
@@ -52,23 +57,102 @@ _validate_training_contract(
 print("Reaction-v5.1 200K->300K training-dose contract verified")
 PY
 
-RUN_NAME="${RUN_NAME}" \
-OUTPUT_ROOT="${OUTPUT_ROOT}" \
-STAGE_A_CHECKPOINT="${PARENT_CHECKPOINT}" \
-STAGE_B_CHECKPOINT="${CANDIDATE_CHECKPOINT}" \
-STAGE_B_STEP=300000 \
-EVAL_ROOT="${EVAL_ROOT}" \
-GPU_IDS="${GPU_IDS}" \
-PYTHON_BIN="${PYTHON_BIN}" \
-ALLOW_REACTION_LOSS_ABLATION=1 \
-ALLOW_SAME_MIX_EXTENSION_AT_STEP=200000 \
-EVAL_PHASE=all \
-  bash scripts/launch/eval_hy273_unified_reaction_stage_b_200k.sh
+ensure_baseline_edit_cfg2() {
+  if [[ -f "${BASELINE_EDIT_SUMMARY}" ]]; then
+    return
+  fi
+  echo "Generating the matched 200K Edit CFG=2 baseline: ${BASELINE_EDIT_CFG2_ROOT}"
+  RUN_NAME="${RUN_NAME}" \
+  OUTPUT_ROOT="${OUTPUT_ROOT}" \
+  STAGE_A_CHECKPOINT="${PARENT_CHECKPOINT}" \
+  STAGE_B_CHECKPOINT="${BASELINE_CHECKPOINT}" \
+  STAGE_B_STEP=200000 \
+  EVAL_ROOT="${BASELINE_EDIT_CFG2_ROOT}" \
+  GPU_IDS="${GPU_IDS}" \
+  PYTHON_BIN="${PYTHON_BIN}" \
+  T2M_SHARDS="${T2M_SHARDS}" \
+  EDIT_SHARDS="${EDIT_SHARDS}" \
+  EDIT_CFG=2.0 \
+  ALLOW_REACTION_LOSS_ABLATION=1 \
+  EVAL_PHASE=edit_benchmarks \
+    bash scripts/launch/eval_hy273_unified_reaction_stage_b_200k.sh
+}
+
+if [[ "${EVAL_PHASE}" != "diagnostics" ]]; then
+  ensure_baseline_edit_cfg2
+fi
+
+if [[ "${EVAL_PHASE}" != "finalize" ]]; then
+  RUN_NAME="${RUN_NAME}" \
+  OUTPUT_ROOT="${OUTPUT_ROOT}" \
+  STAGE_A_CHECKPOINT="${PARENT_CHECKPOINT}" \
+  STAGE_B_CHECKPOINT="${CANDIDATE_CHECKPOINT}" \
+  STAGE_B_STEP=300000 \
+  EVAL_ROOT="${EVAL_ROOT}" \
+  GPU_IDS="${GPU_IDS}" \
+  PYTHON_BIN="${PYTHON_BIN}" \
+  T2M_SHARDS="${T2M_SHARDS}" \
+  EDIT_SHARDS="${EDIT_SHARDS}" \
+  EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT="${BASELINE_CHECKPOINT}" \
+  EDIT_DIAGNOSTIC_BASELINE_STEP=200000 \
+  EDIT_DIAGNOSTIC_BASELINE_LABEL=stageB200k \
+  EDIT_DIAGNOSTIC_ALLOW_REACTION_LOSS_ABLATION=0 \
+  EDIT_CFG=2.0 \
+  ALLOW_REACTION_LOSS_ABLATION=1 \
+  ALLOW_SAME_MIX_EXTENSION_AT_STEP=200000 \
+  EVAL_PHASE="${EVAL_PHASE}" \
+    bash scripts/launch/eval_hy273_unified_reaction_stage_b_200k.sh
+fi
+
+case "${EVAL_PHASE}" in
+  benchmarks)
+    echo "Reaction-v5.1 300K T2M and MotionFix benchmarks complete: ${EVAL_ROOT}"
+    exit 0
+    ;;
+  edit_benchmarks)
+    echo "Reaction-v5.1 300K MotionFix benchmarks complete: ${EVAL_ROOT}"
+    exit 0
+    ;;
+  diagnostics)
+    echo "Reaction-v5.1 300K Edit diagnostics complete: ${EVAL_ROOT}"
+    exit 0
+    ;;
+  postprocess)
+    echo "Reaction-v5.1 300K dynamic-Edit aggregation plus T2M/MotionFix benchmark rerun complete: ${EVAL_ROOT}"
+    exit 0
+    ;;
+  all|finalize)
+    ;;
+  *)
+    echo "EVAL_PHASE must be all, finalize, benchmarks, edit_benchmarks, diagnostics, or postprocess" >&2
+    exit 2
+    ;;
+esac
 
 BASELINE_REPORT="${BASELINE_EVAL_ROOT}/reaction/test/reaction_test.json"
 BASELINE_PREDICTIONS="${BASELINE_EVAL_ROOT}/reaction/test/predictions"
 CANDIDATE_REPORT="${EVAL_ROOT}/reaction/test/reaction_test.json"
 CANDIDATE_PREDICTIONS="${EVAL_ROOT}/reaction/test/predictions"
+BASELINE_T2M_SUMMARY="${BASELINE_EVAL_ROOT}/t2m/full_test4042_ema_cfg2/summary.json"
+CANDIDATE_T2M_SUMMARY="${EVAL_ROOT}/t2m/full_test4042_ema_cfg2/summary.json"
+CANDIDATE_EDIT_SUMMARY="${EVAL_ROOT}/edit/full_test1013_ema_sourcecfg2_editcfg2/summary.json"
+
+for path in \
+  "${CANDIDATE_REPORT}" \
+  "${BASELINE_T2M_SUMMARY}" \
+  "${CANDIDATE_T2M_SUMMARY}" \
+  "${BASELINE_EDIT_SUMMARY}" \
+  "${CANDIDATE_EDIT_SUMMARY}"; do
+  [[ -f "${path}" ]] || {
+    echo "Missing required matched-evaluation input: ${path}" >&2
+    exit 2
+  }
+done
+[[ -d "${CANDIDATE_PREDICTIONS}" ]] || {
+  echo "Missing v5.1 300K Reaction predictions" >&2
+  exit 2
+}
+mkdir -p "${EVAL_ROOT}/guardrails"
 
 CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_reaction_matched.py \
   --baseline "${BASELINE_REPORT}" \
@@ -85,6 +169,18 @@ CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_reaction_matched.py 
   --seed 20260807 \
   --output "${EVAL_ROOT}/reaction/test/matched_v5_1_200k_vs_300k.json" \
   >"${EVAL_ROOT}/logs/matched_v5_1_200k_vs_300k_test.log" 2>&1
+
+CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/compare_hy273_t2m_edit_guardrails.py \
+  --baseline_t2m "${BASELINE_T2M_SUMMARY}" \
+  --candidate_t2m "${CANDIDATE_T2M_SUMMARY}" \
+  --baseline_edit "${BASELINE_EDIT_SUMMARY}" \
+  --candidate_edit "${CANDIDATE_EDIT_SUMMARY}" \
+  --baseline_label reaction_v5_1_200000 \
+  --candidate_label reaction_v5_1_300000 \
+  --bootstrap_resamples 10000 \
+  --seed 20260807 \
+  --output "${EVAL_ROOT}/guardrails/matched_t2m_edit_200k_vs_300k.json" \
+  >"${EVAL_ROOT}/logs/matched_t2m_edit_200k_vs_300k.log" 2>&1
 
 CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" tools/render_hy273_reaction_review.py \
   --report_json "${CANDIDATE_REPORT}" \

@@ -210,6 +210,62 @@ def test_dose_contract_accepts_exact_same_mix_extension(monkeypatch) -> None:
         "realized_edit": 35_000,
         "realized_interaction": 35_000,
     }
+    assert result["same_run_metadata_and_stream_continuity_verified"] is True
+    assert result["checkpoint_resume_lineage_verified_by_comparator"] is False
+    assert result["parent_lineage_verified_by_comparator"] is False
+    assert (
+        result["parent_lineage_status"]
+        == "not_revalidated_for_same_run_dose_comparison"
+    )
+
+
+def test_independent_run_contract_requires_external_parent_lineage(
+    monkeypatch,
+) -> None:
+    baseline_config, _ = _dose_configs()
+    baseline_config = {**baseline_config, "reaction_loss": {}}
+    candidate_config = {
+        **baseline_config,
+        "reaction_loss": {
+            "fk_contact_map_negative": 0.005,
+            "fk_contact_map_positive": 0.001,
+            "fk_contact_temperature_m": 0.02,
+            "fk_contact_threshold_m": 0.15,
+            "fk_contact_transition": 0.003,
+            "fk_contact_transition_beta": 0.1,
+            "fk_contact_vector": 0.002,
+            "fk_contact_vector_scale_m": 0.05,
+        },
+    }
+    baseline = _dose_contract(
+        200_000,
+        baseline_config,
+        (130_000, 35_000, 35_000),
+    )
+    candidate = _dose_contract(
+        200_000,
+        candidate_config,
+        (130_000, 35_000, 35_000),
+    )
+    baseline["run_name"] = "reaction_v5"
+    candidate["run_name"] = "reaction_v5_1"
+    contracts = iter((baseline, candidate))
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._load_checkpoint_contract",
+        lambda *args, **kwargs: next(contracts),
+    )
+
+    result = _validate_training_contract(
+        {},
+        {},
+        mode="reaction_v5_1_full_contact",
+        baseline_checkpoint_step=200_000,
+        candidate_checkpoint_step=200_000,
+    )
+
+    assert result["parent_lineage_status"] == "external_launch_record_required"
+    assert result["parent_lineage_verified_by_comparator"] is False
+    assert "external launch records" in result["parent_lineage_note"]
 
 
 def test_dose_contract_rejects_shifted_absolute_exposures(monkeypatch) -> None:

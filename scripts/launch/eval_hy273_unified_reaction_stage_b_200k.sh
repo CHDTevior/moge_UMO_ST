@@ -33,34 +33,71 @@ TEXT_CFG=2.0
 ODE_STEPS=32
 EVAL_SEED=20260801
 CAPTION_POLICY=uid_balanced
-T2M_SHARDS=8
-EDIT_SHARDS=8
-EDIT_CFG=3.0
+T2M_SHARDS="${T2M_SHARDS:-8}"
+EDIT_SHARDS="${EDIT_SHARDS:-8}"
+EDIT_CFG="${EDIT_CFG:-3.0}"
+EDIT_CFG_TAG="${EDIT_CFG%.0}"
 EDIT_SYSTEMS="source_copy,source_instruction_model,shuffled_source_instruction_model,source_shuffled_instruction_model,source_only_model,relative_instruction_only_ood"
 EVAL_PHASE="${EVAL_PHASE:-all}"
 ALLOW_REACTION_LOSS_ABLATION="${ALLOW_REACTION_LOSS_ABLATION:-0}"
 ALLOW_SAME_MIX_EXTENSION_AT_STEP="${ALLOW_SAME_MIX_EXTENSION_AT_STEP:-0}"
+EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT="${EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT:-${STAGE_A_CHECKPOINT}}"
+EDIT_DIAGNOSTIC_BASELINE_STEP="${EDIT_DIAGNOSTIC_BASELINE_STEP:-100000}"
+EDIT_DIAGNOSTIC_BASELINE_LABEL="${EDIT_DIAGNOSTIC_BASELINE_LABEL:-stageA100k}"
+EDIT_DIAGNOSTIC_ALLOW_REACTION_LOSS_ABLATION="${EDIT_DIAGNOSTIC_ALLOW_REACTION_LOSS_ABLATION:-${ALLOW_REACTION_LOSS_ABLATION}}"
 MULTITASK_MANIFEST_ROOT="/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1"
 EDIT_COUNTERFACTUAL_ROOT="${EDIT_COUNTERFACTUAL_ROOT:-/mnt/afs/mogeflow-control/outputs/hy273_multitask/gates}"
 
-[[ ${#GPUS[@]} -ge 8 ]] || {
-  echo "GPU_IDS must provide eight GPUs" >&2
+[[ "${T2M_SHARDS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "T2M_SHARDS must be a positive integer" >&2
+  exit 2
+}
+[[ "${EDIT_SHARDS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "EDIT_SHARDS must be a positive integer" >&2
+  exit 2
+}
+[[ "${EDIT_CFG}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+  echo "EDIT_CFG must be a non-negative number" >&2
+  exit 2
+}
+required_gpus=8
+if [[ "${EVAL_PHASE}" == "all" ]]; then
+  (( T2M_SHARDS > required_gpus )) && required_gpus="${T2M_SHARDS}"
+  (( EDIT_SHARDS > required_gpus )) && required_gpus="${EDIT_SHARDS}"
+elif [[ "${EVAL_PHASE}" == "benchmarks" || "${EVAL_PHASE}" == "postprocess" ]]; then
+  required_gpus="${T2M_SHARDS}"
+  (( EDIT_SHARDS > required_gpus )) && required_gpus="${EDIT_SHARDS}"
+elif [[ "${EVAL_PHASE}" == "edit_benchmarks" ]]; then
+  required_gpus="${EDIT_SHARDS}"
+elif [[ "${EVAL_PHASE}" == "diagnostics" ]]; then
+  required_gpus=6
+fi
+[[ ${#GPUS[@]} -ge ${required_gpus} ]] || {
+  echo "GPU_IDS must provide at least ${required_gpus} GPUs for EVAL_PHASE=${EVAL_PHASE}" >&2
   exit 2
 }
 declare -A SEEN_GPUS=()
-for gpu in "${GPUS[@]:0:8}"; do
+for gpu in "${GPUS[@]:0:${required_gpus}}"; do
   [[ -n "${gpu}" && -z "${SEEN_GPUS[${gpu}]:-}" ]] || {
-    echo "The first eight GPU_IDS entries must be non-empty and unique" >&2
+    echo "The first ${required_gpus} GPU_IDS entries must be non-empty and unique" >&2
     exit 2
   }
   SEEN_GPUS["${gpu}"]=1
 done
-for checkpoint in "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}"; do
+for checkpoint in "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}" "${EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT}"; do
   [[ -f "${checkpoint}" ]] || {
     echo "Missing Unified Reaction checkpoint: ${checkpoint}" >&2
     exit 2
   }
 done
+[[ "${EDIT_DIAGNOSTIC_BASELINE_STEP}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "EDIT_DIAGNOSTIC_BASELINE_STEP must be a positive integer" >&2
+  exit 2
+}
+[[ "${EDIT_DIAGNOSTIC_BASELINE_LABEL}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+  echo "EDIT_DIAGNOSTIC_BASELINE_LABEL contains unsupported characters" >&2
+  exit 2
+}
 
 "${PYTHON_BIN}" - \
   "${STAGE_A_CHECKPOINT}" \
@@ -353,17 +390,83 @@ run_dynamic_edit() {
     --overwrite
 }
 
+validate_dynamic_edit_records() {
+  CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" - \
+    "${EVAL_ROOT}/edit/dynamic" \
+    "${STAGE_A_CHECKPOINT}" \
+    "${STAGE_B_CHECKPOINT}" \
+    "${STAGE_B_STEP}" \
+    "${ODE_STEPS}" \
+    "${SOURCE_CFG}" <<'PY'
+import json
+import math
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).expanduser().resolve()
+stage_a = str(Path(sys.argv[2]).expanduser().resolve())
+stage_b = str(Path(sys.argv[3]).expanduser().resolve())
+stage_b_step = int(sys.argv[4])
+ode_steps = int(sys.argv[5])
+source_cfg = float(sys.argv[6])
+selection = json.loads((root / "selection.json").read_text(encoding="utf-8"))
+if (
+    int(selection.get("selection_seed", -1)) != 20260724
+    or int(selection.get("limit_per_category", -1)) != 16
+    or int(selection.get("max_frames", -1)) != 300
+):
+    raise RuntimeError("Dynamic Edit selection does not match the frozen protocol")
+pair_ids = [str(row["pair_id"]) for row in selection["selected_pairs"]]
+if len(pair_ids) != len(set(pair_ids)):
+    raise RuntimeError("Dynamic Edit selection contains duplicate pairs")
+expected = {
+    "stageA100k_cfg3": (stage_a, 100000, 3.0),
+    f"stageB{stage_b_step // 1000}k_cfg2": (stage_b, stage_b_step, 2.0),
+    f"stageB{stage_b_step // 1000}k_cfg3": (stage_b, stage_b_step, 3.0),
+}
+records = []
+for path in sorted((root / "records").glob("*.jsonl")):
+    with path.open(encoding="utf-8") as handle:
+        records.extend(json.loads(line) for line in handle if line.strip())
+if {str(row.get("label")) for row in records} != set(expected):
+    raise RuntimeError("Dynamic Edit record labels do not match this evaluation")
+seen = set()
+for row in records:
+    label = str(row["label"])
+    pair_id = str(row["pair_id"])
+    key = (label, pair_id)
+    if key in seen or pair_id not in pair_ids:
+        raise RuntimeError(f"Invalid Dynamic Edit record identity: {key}")
+    seen.add(key)
+    checkpoint, step, edit_cfg = expected[label]
+    actual_checkpoint = str(Path(row["checkpoint"]).expanduser().resolve())
+    if (
+        actual_checkpoint != checkpoint
+        or int(row.get("checkpoint_step", -1)) != step
+        or row.get("weight_source") != "ema"
+        or int(row.get("ode_steps", -1)) != ode_steps
+        or not math.isclose(float(row.get("source_cfg_scale", -1.0)), source_cfg)
+        or not math.isclose(float(row.get("edit_cfg_scale", -1.0)), edit_cfg)
+    ):
+        raise RuntimeError(f"Dynamic Edit record has the wrong scientific identity: {key}")
+expected_keys = {(label, pair_id) for label in expected for pair_id in pair_ids}
+if seen != expected_keys:
+    raise RuntimeError("Dynamic Edit records do not cover every selected pair and system")
+print(f"Dynamic Edit scientific identity verified: {len(records)} records")
+PY
+}
+
 run_edit_diagnostics() {
   local root="${EVAL_ROOT}/edit/same_source"
   local ablation_args=()
-  if [[ "${ALLOW_REACTION_LOSS_ABLATION}" == "1" ]]; then
+  if [[ "${EDIT_DIAGNOSTIC_ALLOW_REACTION_LOSS_ABLATION}" == "1" ]]; then
     ablation_args+=(--allow_reaction_loss_ablation)
   fi
   CUDA_VISIBLE_DEVICES="${GPUS[5]}" "${PYTHON_BIN}" \
     tools/eval_hy273_edit_same_source_fixed_t.py \
-    --checkpoint "stageA100k=${STAGE_A_CHECKPOINT}" \
+    --checkpoint "${EDIT_DIAGNOSTIC_BASELINE_LABEL}=${EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT}" \
     --checkpoint "${STAGE_B_LABEL}=${STAGE_B_CHECKPOINT}" \
-    --system_expectation stageA100k=100000,none \
+    --system_expectation "${EDIT_DIAGNOSTIC_BASELINE_LABEL}=${EDIT_DIAGNOSTIC_BASELINE_STEP},none" \
     --system_expectation "${STAGE_B_LABEL}=${STAGE_B_STEP},none" \
     --weight_source ema \
     --timesteps 0,0.05,0.1 \
@@ -372,20 +475,20 @@ run_edit_diagnostics() {
     --ode_groups_per_batch 1 \
     --source_cfg_scale "${SOURCE_CFG}" \
     --edit_cfg_scale 3.0 \
-    --direct_comparison "stageA100k,${STAGE_B_LABEL}" \
+    --direct_comparison "${EDIT_DIAGNOSTIC_BASELINE_LABEL},${STAGE_B_LABEL}" \
     "${ablation_args[@]}" \
     --device cuda:0 \
     --output "${EVAL_ROOT}/edit/same_source_assignment_ema_cfg3.json"
   CUDA_VISIBLE_DEVICES="${GPUS[5]}" "${PYTHON_BIN}" \
     tools/sample_hy273_edit_same_source_visuals.py \
-    --checkpoint "${STAGE_A_CHECKPOINT}" \
-    --label stageA100k_cfg3 \
+    --checkpoint "${EDIT_DIAGNOSTIC_BASELINE_CHECKPOINT}" \
+    --label "${EDIT_DIAGNOSTIC_BASELINE_LABEL}_cfg3" \
     --weight_source ema \
     --ode_steps "${ODE_STEPS}" \
     --source_cfg_scale "${SOURCE_CFG}" \
     --edit_cfg_scale 3.0 \
     --device cuda:0 \
-    --output_dir "${root}/samples/stageA100k_cfg3"
+    --output_dir "${root}/samples/${EDIT_DIAGNOSTIC_BASELINE_LABEL}_cfg3"
   CUDA_VISIBLE_DEVICES="${GPUS[5]}" "${PYTHON_BIN}" \
     tools/sample_hy273_edit_same_source_visuals.py \
     --checkpoint "${STAGE_B_CHECKPOINT}" \
@@ -398,7 +501,7 @@ run_edit_diagnostics() {
     --output_dir "${root}/samples/${STAGE_B_LABEL}_cfg3"
   CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" \
     tools/render_hy273_edit_same_source_comparison.py \
-    --system "stageA100k_cfg3=${root}/samples/stageA100k_cfg3" \
+    --system "${EDIT_DIAGNOSTIC_BASELINE_LABEL}_cfg3=${root}/samples/${EDIT_DIAGNOSTIC_BASELINE_LABEL}_cfg3" \
     --system "${STAGE_B_LABEL}_cfg3=${root}/samples/${STAGE_B_LABEL}_cfg3" \
     --branch_system "${STAGE_B_LABEL}_cfg3" \
     --output_dir "${root}/gifs"
@@ -501,7 +604,7 @@ run_t2m_full_benchmark() {
 run_motionfix_full_benchmark() {
   local protocol="$1"
   local label="$2"
-  local root="${EVAL_ROOT}/edit/${label}_ema_sourcecfg2_editcfg3"
+  local root="${EVAL_ROOT}/edit/${label}_ema_sourcecfg2_editcfg${EDIT_CFG_TAG}"
   local preflight="${root}/preflight_manifest.json"
   local preflight_sha
   local manifest
@@ -583,8 +686,28 @@ if [[ "${EVAL_PHASE}" == "edit_benchmarks" ]]; then
   echo "Unified Reaction ${STAGE_B_LABEL} Edit benchmark evaluation complete: ${EVAL_ROOT}"
   exit 0
 fi
+if [[ "${EVAL_PHASE}" == "diagnostics" ]]; then
+  run_edit_diagnostics
+  echo "Unified Reaction ${STAGE_B_LABEL} Edit diagnostics complete: ${EVAL_ROOT}"
+  exit 0
+fi
+if [[ "${EVAL_PHASE}" == "postprocess" ]]; then
+  validate_dynamic_edit_records
+  "${PYTHON_BIN}" tools/eval_hy273_dynamic_edits.py \
+    --mode aggregate \
+    --output_dir "${EVAL_ROOT}/edit/dynamic" \
+    --labels "stageA100k_cfg3,${STAGE_B_LABEL}_cfg2,${STAGE_B_LABEL}_cfg3" \
+    --limit_per_category 16 \
+    --render_per_category 3 \
+    --render_stride 3
+  run_t2m_full_benchmark
+  run_motionfix_full_benchmark motionfix_val_selected_internal_k273_v1 full_val330
+  run_motionfix_full_benchmark motionfix_full_requested_length_1013_internal_k273_v1 full_test1013
+  echo "Unified Reaction ${STAGE_B_LABEL} postprocessing complete: ${EVAL_ROOT}"
+  exit 0
+fi
 [[ "${EVAL_PHASE}" == "all" ]] || {
-  echo "EVAL_PHASE must be all, benchmarks, or edit_benchmarks" >&2
+  echo "EVAL_PHASE must be all, benchmarks, edit_benchmarks, diagnostics, or postprocess" >&2
   exit 2
 }
 
@@ -626,6 +749,7 @@ if [[ "${status}" -ne 0 ]]; then
   exit "${status}"
 fi
 
+validate_dynamic_edit_records
 "${PYTHON_BIN}" tools/eval_hy273_dynamic_edits.py \
   --mode aggregate \
   --output_dir "${EVAL_ROOT}/edit/dynamic" \
