@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import numpy as np
 import pytest
 
@@ -7,7 +8,10 @@ from tools.compare_hy273_reaction_matched import (
     EXPECTED_SAMPLING,
     REQUIRED_VARIANTS,
     _cluster_counts,
+    _replay_cursor_state,
     _recompute_metrics_from_predictions,
+    _validate_prediction_input_identity,
+    _validate_training_contract,
     _validate_protocol,
 )
 from models.raw_motion.hy273_slices import DIM_HY273
@@ -96,9 +100,233 @@ def test_protocol_validation_accepts_fixed_200k_test_selection() -> None:
     _validate_protocol(
         payload,
         payload,
-        expected_checkpoint_step=200_000,
+        baseline_checkpoint_step=200_000,
+        candidate_checkpoint_step=200_000,
         expected_split="test",
     )
+
+
+def _dose_configs() -> tuple[dict, dict]:
+    base_config = {
+        "schedule": {
+            "segments": [
+                {"start": 0, "end": 100_000, "t2m": 100, "edit": 0, "reaction": 0},
+                {"start": 100_000, "end": 200_000, "t2m": 30, "edit": 35, "reaction": 35},
+            ]
+        },
+        "training": {"max_global_step": 200_000},
+    }
+    candidate_config = {
+        **base_config,
+        "schedule": {
+            "segments": [
+                base_config["schedule"]["segments"][0],
+                {**base_config["schedule"]["segments"][1], "end": 300_000},
+            ]
+        },
+        "training": {"max_global_step": 300_000},
+    }
+    return base_config, candidate_config
+
+
+def _dose_contract(
+    step: int,
+    config: dict,
+    counts: tuple[int, int, int],
+) -> dict:
+    static = {
+        "format": "batcher",
+        "multitask_manifest": "manifest",
+        "interaction_root": "interaction",
+        "run_seed": 7,
+        "world_size": 8,
+        "interaction_exclude_overlength": True,
+        "paired_task": "reaction",
+        "local_batch_sizes": {"0": 16, "1": 8, "2": 8},
+        "manifest_hashes": {"train": "hash"},
+    }
+    hml, edit, reaction = counts
+    global_batches = (128, 64, 64)
+    return {
+        "path": f"step_{step:08d}.pt",
+        "run_name": "same_run",
+        "config_path": "config.yaml",
+        "config": config,
+        "rng_contract": "stateless",
+        "ema_update_count": step // 10,
+        "batcher": {
+            **static,
+            "scheduler": {
+                "segments": config["schedule"]["segments"],
+                "state": {
+                    "next_step": step,
+                    "debt_hml": 0,
+                    "debt_edit": 0,
+                    "debt_interaction": 0,
+                    "realized_hml": hml,
+                    "realized_edit": edit,
+                    "realized_interaction": reaction,
+                },
+            },
+            "cursors": {
+                str(stream): {"global_batch_size": global_batch}
+                for stream, global_batch in enumerate(global_batches)
+            },
+            "next_global_sample_ordinal": {
+                "0": hml * global_batches[0],
+                "1": edit * global_batches[1],
+                "2": reaction * global_batches[2],
+            },
+        },
+    }
+
+
+def test_dose_contract_accepts_exact_same_mix_extension(monkeypatch) -> None:
+    base_config, candidate_config = _dose_configs()
+
+    contracts = iter(
+        (
+            _dose_contract(200_000, base_config, (130_000, 35_000, 35_000)),
+            _dose_contract(300_000, candidate_config, (160_000, 70_000, 70_000)),
+        )
+    )
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._load_checkpoint_contract",
+        lambda *args, **kwargs: next(contracts),
+    )
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._validate_stream_continuity",
+        lambda *args, **kwargs: {"exact_cursor_state_match": True},
+    )
+    result = _validate_training_contract(
+        {},
+        {},
+        mode="same_run_dose_extension",
+        baseline_checkpoint_step=200_000,
+        candidate_checkpoint_step=300_000,
+    )
+    assert result["additional_task_updates"] == {
+        "realized_hml": 30_000,
+        "realized_edit": 35_000,
+        "realized_interaction": 35_000,
+    }
+
+
+def test_dose_contract_rejects_shifted_absolute_exposures(monkeypatch) -> None:
+    base_config, candidate_config = _dose_configs()
+    contracts = iter(
+        (
+            _dose_contract(200_000, base_config, (129_000, 36_000, 35_000)),
+            _dose_contract(300_000, candidate_config, (159_000, 71_000, 70_000)),
+        )
+    )
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._load_checkpoint_contract",
+        lambda *args, **kwargs: next(contracts),
+    )
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._validate_stream_continuity",
+        lambda *args, **kwargs: {"exact_cursor_state_match": True},
+    )
+    with pytest.raises(ValueError, match="wrong absolute task exposures"):
+        _validate_training_contract(
+            {},
+            {},
+            mode="same_run_dose_extension",
+            baseline_checkpoint_step=200_000,
+            candidate_checkpoint_step=300_000,
+        )
+
+
+def test_cursor_replay_composes_across_resume_boundary() -> None:
+    saved = {
+        "format": "hy273_sortish_stream_cursor_v1",
+        "manifest_sha256": "manifest",
+        "run_seed": 7,
+        "stream": 0,
+        "global_batch_size": 2,
+        "sort_window_batches": 3,
+        "row_count": 11,
+        "cycle": 0,
+        "offset": 0,
+        "pending_batches": [],
+    }
+    kwargs = {
+        "row_bucket_keys": tuple((index % 3, 0) for index in range(11)),
+        "manifest_sha256": "manifest",
+        "run_seed": 7,
+        "stream": 0,
+    }
+    at_three = _replay_cursor_state(saved, updates=3, **kwargs)
+    resumed = _replay_cursor_state(at_three, updates=4, **kwargs)
+    uninterrupted = _replay_cursor_state(saved, updates=7, **kwargs)
+    assert resumed == uninterrupted
+    assert uninterrupted != saved
+
+
+def _write_prediction_input_case(root, *, text: str, target_value: float) -> None:
+    case = root / "case"
+    case.mkdir(parents=True)
+    source = np.zeros((4, DIM_HY273), dtype=np.float32)
+    target = np.full((4, DIM_HY273), target_value, dtype=np.float32)
+    np.save(case / "source.npy", source)
+    np.save(case / "target.npy", target)
+    (case / "metadata.json").write_text(
+        json.dumps(
+            {
+                "uid": "case",
+                "text": text,
+                "caption_index": 0,
+                "negative_donor_uid": "donor",
+                "negative_donor_text": "other",
+                "actor_person_index": 0,
+                "length": 4,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _prediction_identity_payload() -> dict:
+    return {
+        "per_sample": {
+            "source_text": [
+                {
+                    "uid": "case",
+                    "variant": "source_text",
+                    "caption_index": 0,
+                    "dataset_index": 0,
+                }
+            ]
+        }
+    }
+
+
+def test_prediction_input_identity_checks_physical_data_and_text(tmp_path) -> None:
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    _write_prediction_input_case(baseline, text="react", target_value=1.0)
+    _write_prediction_input_case(candidate, text="react", target_value=1.0)
+    result = _validate_prediction_input_identity(
+        _prediction_identity_payload(),
+        _prediction_identity_payload(),
+        baseline,
+        candidate,
+    )
+    assert result["uids"] == 1
+
+    np.save(
+        candidate / "case" / "target.npy",
+        np.full((4, DIM_HY273), 2.0, dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="target.npy content differs"):
+        _validate_prediction_input_identity(
+            _prediction_identity_payload(),
+            _prediction_identity_payload(),
+            baseline,
+            candidate,
+        )
 
 
 def test_prediction_recomputation_rejects_mismatched_report(tmp_path) -> None:

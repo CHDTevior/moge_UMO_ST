@@ -55,6 +55,7 @@ MEAN_METRICS = (
     "first_close_too_early_s_20cm",
     "first_close_too_late_s_20cm",
     "reactor_fk_jerk_error_mps3",
+    "reactor_prediction_fk_jerk_mps3",
 )
 LAYOUT_PHASE_MEAN_METRICS = (
     "frame0_relative_root_error_cm",
@@ -90,6 +91,16 @@ PREDICTION_REPORT_CONSISTENCY_METRICS = (
     "reactor_root_error_cm",
     "fk_relation_distance_mae_cm",
 )
+TASK_EXPOSURE_KEYS = {
+    "realized_hml": "t2m",
+    "realized_edit": "edit",
+    "realized_interaction": "reaction",
+}
+TASK_STREAM_IDS = {
+    "realized_hml": 0,
+    "realized_edit": 1,
+    "realized_interaction": 2,
+}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -240,6 +251,66 @@ def _recompute_metrics_from_predictions(
     return payload
 
 
+def _validate_prediction_input_identity(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    baseline_dir: Path,
+    candidate_dir: Path,
+) -> dict[str, Any]:
+    """Require both matched arms to use identical physical inputs and captions."""
+
+    baseline_dir = baseline_dir.expanduser().resolve(strict=True)
+    candidate_dir = candidate_dir.expanduser().resolve(strict=True)
+    baseline_rows = _rows_by_uid(baseline, "source_text")
+    candidate_rows = _rows_by_uid(candidate, "source_text")
+    if set(baseline_rows) != set(candidate_rows):
+        raise ValueError("Prediction input identity requires matched UID sets")
+
+    metadata_fields = (
+        "uid",
+        "text",
+        "caption_index",
+        "negative_donor_uid",
+        "negative_donor_text",
+        "actor_person_index",
+        "length",
+    )
+    tensor_names = ("source.npy", "target.npy")
+    for uid in sorted(baseline_rows):
+        left_case = baseline_dir / uid
+        right_case = candidate_dir / uid
+        with (left_case / "metadata.json").open("r", encoding="utf-8") as handle:
+            left_metadata = json.load(handle)
+        with (right_case / "metadata.json").open("r", encoding="utf-8") as handle:
+            right_metadata = json.load(handle)
+        for field in metadata_fields:
+            if left_metadata.get(field) != right_metadata.get(field):
+                raise ValueError(
+                    f"Matched evaluation metadata differs for UID {uid}, "
+                    f"field {field!r}: {left_metadata.get(field)!r} != "
+                    f"{right_metadata.get(field)!r}"
+                )
+        for tensor_name in tensor_names:
+            left = np.load(left_case / tensor_name, mmap_mode="r", allow_pickle=False)
+            right = np.load(right_case / tensor_name, mmap_mode="r", allow_pickle=False)
+            if left.shape != right.shape or left.dtype != right.dtype:
+                raise ValueError(
+                    f"Matched {tensor_name} schema differs for UID {uid}: "
+                    f"{left.shape}/{left.dtype} != {right.shape}/{right.dtype}"
+                )
+            if not np.array_equal(left, right):
+                raise ValueError(
+                    f"Matched evaluation {tensor_name} content differs for UID {uid}"
+                )
+
+    return {
+        "uids": len(baseline_rows),
+        "metadata_fields": list(metadata_fields),
+        "physical_tensors": list(tensor_names),
+        "comparison": "exact_array_and_metadata_equality",
+    }
+
+
 def _validate_single_protocol(
     payload: dict[str, Any],
     label: str,
@@ -313,19 +384,20 @@ def _validate_protocol(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
     *,
-    expected_checkpoint_step: int,
+    baseline_checkpoint_step: int,
+    candidate_checkpoint_step: int,
     expected_split: str,
 ) -> None:
     _validate_single_protocol(
         baseline,
         "baseline",
-        expected_checkpoint_step=expected_checkpoint_step,
+        expected_checkpoint_step=baseline_checkpoint_step,
         expected_split=expected_split,
     )
     _validate_single_protocol(
         candidate,
         "candidate",
-        expected_checkpoint_step=expected_checkpoint_step,
+        expected_checkpoint_step=candidate_checkpoint_step,
         expected_split=expected_split,
     )
     scalar_fields = ("split", "caption_policy", "weight_source", "assignment_rule")
@@ -365,6 +437,190 @@ def _config_differences(
     if left != right:
         return [(path, left, right)]
     return []
+
+
+def _expected_schedule_exposures(
+    segments: list[dict[str, Any]],
+    checkpoint_step: int,
+) -> dict[str, int]:
+    expected = {key: 0 for key in TASK_EXPOSURE_KEYS}
+    previous_end = 0
+    covered = 0
+    paired_key: str | None = None
+    for segment in segments:
+        start = int(segment["start"])
+        end = int(segment["end"])
+        if start != previous_end or end <= start:
+            raise ValueError("Task schedule is not contiguous and non-empty")
+        current_paired_key = "reaction" if "reaction" in segment else "interaction"
+        if paired_key is None:
+            paired_key = current_paired_key
+        elif paired_key != current_paired_key:
+            raise ValueError("Task schedule changes paired-task key")
+        weights = {
+            "realized_hml": int(segment["t2m"]),
+            "realized_edit": int(segment["edit"]),
+            "realized_interaction": int(segment[current_paired_key]),
+        }
+        if min(weights.values()) < 0 or sum(weights.values()) != 100:
+            raise ValueError("Task schedule weights must be non-negative and sum to 100")
+        active = max(0, min(end, checkpoint_step) - start)
+        if active:
+            covered += active
+            for state_key, weight in weights.items():
+                numerator = active * weight
+                if numerator % 100:
+                    raise ValueError(
+                        "Checkpoint boundary does not have an exact weighted task count"
+                    )
+                expected[state_key] += numerator // 100
+        previous_end = end
+    if covered != checkpoint_step:
+        raise ValueError(
+            f"Task schedule covers {covered} updates at checkpoint {checkpoint_step}"
+        )
+    return expected
+
+
+def _validate_scheduler_at_step(
+    contract: dict[str, Any],
+    checkpoint_step: int,
+) -> dict[str, int]:
+    batcher = contract["batcher"]
+    scheduler = batcher.get("scheduler")
+    if not isinstance(scheduler, dict):
+        raise ValueError("Checkpoint lacks scheduler state")
+    config_segments = list(contract["config"]["schedule"]["segments"])
+    if scheduler.get("segments") != config_segments:
+        raise ValueError("Checkpoint scheduler segments differ from embedded config")
+    state = scheduler.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("Checkpoint lacks scheduler counters")
+    if int(state.get("next_step", -1)) != checkpoint_step:
+        raise ValueError("Checkpoint scheduler step does not match checkpoint")
+    if any(
+        int(state.get(key, -1)) != 0
+        for key in ("debt_hml", "debt_edit", "debt_interaction")
+    ):
+        raise ValueError("Checkpoint scheduler has non-zero task debt")
+
+    expected = _expected_schedule_exposures(config_segments, checkpoint_step)
+    actual = {key: int(state.get(key, -1)) for key in TASK_EXPOSURE_KEYS}
+    if actual != expected:
+        raise ValueError(
+            f"Checkpoint has wrong absolute task exposures: {actual} != {expected}"
+        )
+
+    world_size = int(batcher.get("world_size", -1))
+    local_batch_sizes = batcher.get("local_batch_sizes")
+    ordinals = batcher.get("next_global_sample_ordinal")
+    cursors = batcher.get("cursors")
+    if (
+        world_size <= 0
+        or not isinstance(local_batch_sizes, dict)
+        or not isinstance(ordinals, dict)
+        or not isinstance(cursors, dict)
+    ):
+        raise ValueError("Checkpoint lacks complete stream-cursor metadata")
+    for state_key, stream_id in TASK_STREAM_IDS.items():
+        stream_key = str(stream_id)
+        global_batch = int(local_batch_sizes.get(stream_key, -1)) * world_size
+        cursor = cursors.get(stream_key)
+        if global_batch <= 0 or not isinstance(cursor, dict):
+            raise ValueError(f"Checkpoint lacks cursor for stream {stream_id}")
+        if int(cursor.get("global_batch_size", -1)) != global_batch:
+            raise ValueError(f"Cursor batch size is wrong for stream {stream_id}")
+        expected_ordinal = expected[state_key] * global_batch
+        if int(ordinals.get(stream_key, -1)) != expected_ordinal:
+            raise ValueError(
+                f"Stream {stream_id} sample ordinal is not aligned with task exposure"
+            )
+    return expected
+
+
+def _replay_cursor_state(
+    saved: dict[str, Any],
+    *,
+    row_bucket_keys: tuple[tuple[int, int], ...],
+    manifest_sha256: str,
+    run_seed: int,
+    stream: int,
+    updates: int,
+) -> dict[str, Any]:
+    from data.hy273_multitask_scheduler import DeterministicStreamCursor
+    from models.raw_motion.hy273_multitask_condition import TrainStream
+
+    cursor = DeterministicStreamCursor(
+        row_bucket_keys=row_bucket_keys,
+        manifest_sha256=manifest_sha256,
+        run_seed=run_seed,
+        stream=TrainStream(stream),
+        global_batch_size=int(saved["global_batch_size"]),
+        sort_window_batches=int(saved["sort_window_batches"]),
+    )
+    cursor.load_state_dict(saved)
+    for _ in range(int(updates)):
+        cursor.next_global_batch()
+    return cursor.state_dict()
+
+
+def _validate_stream_continuity(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    exposure_delta: dict[str, int],
+) -> dict[str, Any]:
+    """Replay only cursor bookkeeping from 200K to prove exact data continuation."""
+
+    from data.hy273_multitask_manifest_dataset import HY273MultitaskManifestDataset
+    from data.hy273_reaction_dataset import HY273ReactionDataset
+    from models.raw_motion.hy273_multitask_condition import TrainStream
+
+    left_batcher = left["batcher"]
+    right_batcher = right["batcher"]
+    datasets = {
+        TrainStream.HML_MIXED: HY273MultitaskManifestDataset(
+            left_batcher["multitask_manifest"],
+            TrainStream.HML_MIXED,
+            verify_payload_hash=False,
+        ),
+        TrainStream.MOTION_EDIT: HY273MultitaskManifestDataset(
+            left_batcher["multitask_manifest"],
+            TrainStream.MOTION_EDIT,
+            verify_payload_hash=False,
+        ),
+        TrainStream.REACTION: HY273ReactionDataset(
+            left_batcher["interaction_root"],
+            split="train",
+            exclude_overlength=bool(
+                left_batcher["interaction_exclude_overlength"]
+            ),
+        ),
+    }
+    streams = {
+        "realized_hml": TrainStream.HML_MIXED,
+        "realized_edit": TrainStream.MOTION_EDIT,
+        "realized_interaction": TrainStream.REACTION,
+    }
+    for state_key, stream in streams.items():
+        stream_key = str(int(stream))
+        saved = left_batcher["cursors"][stream_key]
+        expected_cursor = _replay_cursor_state(
+            saved,
+            row_bucket_keys=datasets[stream].bucket_keys,
+            manifest_sha256=datasets[stream].manifest_sha256,
+            run_seed=int(left_batcher["run_seed"]),
+            stream=int(stream),
+            updates=int(exposure_delta[state_key]),
+        )
+        if expected_cursor != right_batcher["cursors"].get(stream_key):
+            raise ValueError(
+                f"Stream {int(stream)} cursor does not exactly continue from baseline"
+            )
+    return {
+        "replayed_task_updates": dict(exposure_delta),
+        "streams": [0, 1, 2],
+        "exact_cursor_state_match": True,
+    }
 
 
 def _load_checkpoint_contract(
@@ -407,6 +663,18 @@ def _load_checkpoint_contract(
     config = checkpoint.get("config")
     if not isinstance(config, dict):
         raise ValueError(f"{label} checkpoint has no embedded config")
+    ema_every = int(config.get("training", {}).get("ema_every", 0))
+    if ema_every <= 0:
+        raise ValueError(f"{label} checkpoint has an invalid EMA interval")
+    expected_ema_updates = (
+        expected_checkpoint_step + ema_every - 1
+    ) // ema_every
+    ema_update_count = int(checkpoint.get("ema_update_count", -1))
+    if ema_update_count != expected_ema_updates:
+        raise ValueError(
+            f"{label} EMA update count is wrong: "
+            f"{ema_update_count} != {expected_ema_updates}"
+        )
     batcher = checkpoint.get("batcher")
     if not isinstance(batcher, dict):
         raise ValueError(f"{label} checkpoint has no batcher state")
@@ -416,6 +684,7 @@ def _load_checkpoint_contract(
         "config_path": checkpoint.get("config_path"),
         "config": config,
         "rng_contract": checkpoint.get("rng_contract"),
+        "ema_update_count": ema_update_count,
         "batcher": batcher,
     }
 
@@ -425,19 +694,25 @@ def _validate_training_contract(
     candidate: dict[str, Any],
     *,
     mode: str,
-    expected_checkpoint_step: int,
+    baseline_checkpoint_step: int,
+    candidate_checkpoint_step: int,
 ) -> dict[str, Any]:
     left = _load_checkpoint_contract(
         baseline,
         "baseline",
-        expected_checkpoint_step=expected_checkpoint_step,
+        expected_checkpoint_step=baseline_checkpoint_step,
     )
     right = _load_checkpoint_contract(
         candidate,
         "candidate",
-        expected_checkpoint_step=expected_checkpoint_step,
+        expected_checkpoint_step=candidate_checkpoint_step,
     )
     differences = _config_differences(left["config"], right["config"])
+    stream_continuity: dict[str, Any] | None = None
+    if mode != "same_run_dose_extension" and (
+        baseline_checkpoint_step != candidate_checkpoint_step
+    ):
+        raise ValueError(f"{mode} requires same-step checkpoints")
     if mode == "p_only_ablation":
         expected_differences = [
             (("reaction_loss", "close_joint_vector"), 0.0, 0.01),
@@ -488,6 +763,88 @@ def _validate_training_contract(
             (("reaction_loss", "fk_contact_vector"), None, 0.002),
             (("reaction_loss", "fk_contact_vector_scale_m"), None, 0.05),
         ]
+    elif mode == "same_run_dose_extension":
+        if candidate_checkpoint_step <= baseline_checkpoint_step:
+            raise ValueError("Dose comparison requires candidate step > baseline step")
+        if left["run_name"] != right["run_name"]:
+            raise ValueError("Dose comparison checkpoints belong to different runs")
+        expected_paths = {
+            ("schedule", "segments"),
+            ("training", "max_global_step"),
+        }
+        if {path for path, _, _ in differences} != expected_paths:
+            formatted = [
+                {"path": ".".join(path), "baseline": old, "candidate": new}
+                for path, old, new in differences
+            ]
+            raise ValueError(
+                "Dose checkpoints differ outside the same-mix horizon extension: "
+                f"{formatted}"
+            )
+        left_segments = list(left["config"]["schedule"]["segments"])
+        right_segments = list(right["config"]["schedule"]["segments"])
+        if len(left_segments) != len(right_segments) or not left_segments:
+            raise ValueError("Dose checkpoint schedules have different structures")
+        left_last = dict(left_segments[-1])
+        right_last = dict(right_segments[-1])
+        left_end = int(left_last.pop("end"))
+        right_end = int(right_last.pop("end"))
+        if not (
+            left_segments[:-1] == right_segments[:-1]
+            and left_last == right_last
+            and left_end == baseline_checkpoint_step
+            and right_end == candidate_checkpoint_step
+            and int(left["config"]["training"]["max_global_step"])
+            == baseline_checkpoint_step
+            and int(right["config"]["training"]["max_global_step"])
+            == candidate_checkpoint_step
+        ):
+            raise ValueError("Dose checkpoints are not an exact final-segment extension")
+
+        static_batcher_keys = (
+            "format",
+            "multitask_manifest",
+            "interaction_root",
+            "run_seed",
+            "world_size",
+            "interaction_exclude_overlength",
+            "paired_task",
+            "local_batch_sizes",
+            "manifest_hashes",
+        )
+        left_static = {key: left["batcher"].get(key) for key in static_batcher_keys}
+        right_static = {key: right["batcher"].get(key) for key in static_batcher_keys}
+        if left_static != right_static:
+            raise ValueError("Dose checkpoints use different data/batcher contracts")
+        left_exposures = _validate_scheduler_at_step(
+            left, baseline_checkpoint_step
+        )
+        right_exposures = _validate_scheduler_at_step(
+            right, candidate_checkpoint_step
+        )
+        dose_steps = candidate_checkpoint_step - baseline_checkpoint_step
+        total_weight = sum(
+            int(right_last[name]) for name in TASK_EXPOSURE_KEYS.values()
+        )
+        exposure_delta: dict[str, int] = {}
+        for state_key, schedule_key in TASK_EXPOSURE_KEYS.items():
+            numerator = dose_steps * int(right_last[schedule_key])
+            if numerator % total_weight:
+                raise ValueError("Dose interval is not divisible by the task mixture")
+            expected_delta = numerator // total_weight
+            actual_delta = right_exposures[state_key] - left_exposures[state_key]
+            if actual_delta != expected_delta:
+                raise ValueError(
+                    f"Dose task exposure mismatch for {state_key}: "
+                    f"{actual_delta} != {expected_delta}"
+                )
+            exposure_delta[state_key] = actual_delta
+        stream_continuity = _validate_stream_continuity(
+            left,
+            right,
+            exposure_delta,
+        )
+        expected_differences = differences
     else:
         raise ValueError(f"Unsupported training-contract mode: {mode!r}")
 
@@ -502,9 +859,9 @@ def _validate_training_contract(
         )
     if left["rng_contract"] != right["rng_contract"]:
         raise ValueError("Checkpoint RNG contracts differ")
-    if left["batcher"] != right["batcher"]:
+    if mode != "same_run_dose_extension" and left["batcher"] != right["batcher"]:
         raise ValueError("Final deterministic batcher states differ between arms")
-    return {
+    result = {
         "baseline_checkpoint": left["path"],
         "candidate_checkpoint": right["path"],
         "baseline_run_name": left["run_name"],
@@ -521,12 +878,42 @@ def _validate_training_contract(
             for path, old, new in differences
         ],
         "rng_contract": left["rng_contract"],
-        "deterministic_batcher_state_matched": True,
+        "ema_update_counts": {
+            "baseline": left["ema_update_count"],
+            "candidate": right["ema_update_count"],
+        },
+        "deterministic_batcher_state_matched": (
+            mode != "same_run_dose_extension"
+        ),
         "parent_lineage_note": (
-            "Both legacy runs were launched from the protocol-locked 100K parent; "
-            "the child checkpoint format does not embed its resume path."
+            "Both checkpoints carry one run name and exact replayed data-stream "
+            "continuity."
+            if mode == "same_run_dose_extension"
+            else (
+                "Both legacy runs were launched from the protocol-locked 100K "
+                "parent; the child checkpoint format does not embed its resume path."
+            )
         ),
     }
+    if mode == "same_run_dose_extension":
+        result.update(
+            {
+                "estimand": "same_run_additional_training_dose",
+                "baseline_checkpoint_step": baseline_checkpoint_step,
+                "candidate_checkpoint_step": candidate_checkpoint_step,
+                "additional_global_steps": (
+                    candidate_checkpoint_step - baseline_checkpoint_step
+                ),
+                "additional_task_updates": exposure_delta,
+                "same_data_and_batcher_static_contract": True,
+                "data_stream_continuity": stream_continuity,
+                "causal_scope": (
+                    "Effect of additional same-recipe training; not an isolated "
+                    "full-contact mechanism effect."
+                ),
+            }
+        )
+    return result
 
 
 def _validate_matched_rows(
@@ -886,6 +1273,8 @@ def main() -> None:
         type=int,
         default=DEFAULT_CHECKPOINT_STEP,
     )
+    parser.add_argument("--baseline_checkpoint_step", type=int)
+    parser.add_argument("--candidate_checkpoint_step", type=int)
     parser.add_argument(
         "--expected_split",
         choices=tuple(EXPECTED_SPLIT_COUNTS),
@@ -898,6 +1287,7 @@ def main() -> None:
             "reaction_v3_adaptive",
             "reaction_v4_layout",
             "reaction_v5_1_full_contact",
+            "same_run_dose_extension",
         ),
         default="p_only_ablation",
     )
@@ -905,15 +1295,26 @@ def main() -> None:
     args = parser.parse_args()
     if args.bootstrap_resamples < 1000:
         parser.error("bootstrap_resamples must be at least 1000 for a 95% interval")
-    if args.expected_checkpoint_step <= 0:
-        parser.error("expected_checkpoint_step must be positive")
+    baseline_checkpoint_step = (
+        args.baseline_checkpoint_step
+        if args.baseline_checkpoint_step is not None
+        else args.expected_checkpoint_step
+    )
+    candidate_checkpoint_step = (
+        args.candidate_checkpoint_step
+        if args.candidate_checkpoint_step is not None
+        else args.expected_checkpoint_step
+    )
+    if baseline_checkpoint_step <= 0 or candidate_checkpoint_step <= 0:
+        parser.error("checkpoint steps must be positive")
 
     baseline = _load(args.baseline)
     candidate = _load(args.candidate)
     _validate_protocol(
         baseline,
         candidate,
-        expected_checkpoint_step=args.expected_checkpoint_step,
+        baseline_checkpoint_step=baseline_checkpoint_step,
+        candidate_checkpoint_step=candidate_checkpoint_step,
         expected_split=args.expected_split,
     )
     prediction_args = (args.baseline_predictions, args.candidate_predictions)
@@ -922,21 +1323,34 @@ def main() -> None:
             "--baseline_predictions and --candidate_predictions must be provided together"
         )
     if (
-        args.training_contract in {"reaction_v4_layout", "reaction_v5_1_full_contact"}
+        args.training_contract
+        in {
+            "reaction_v4_layout",
+            "reaction_v5_1_full_contact",
+            "same_run_dose_extension",
+        }
         and prediction_args[0] is None
     ):
         parser.error(
             f"{args.training_contract} comparison requires both prediction directories so "
             "new phase metrics are recomputed under one implementation"
         )
+    prediction_input_identity: dict[str, Any] | None = None
     if prediction_args[0] is not None and prediction_args[1] is not None:
+        prediction_input_identity = _validate_prediction_input_identity(
+            baseline,
+            candidate,
+            prediction_args[0],
+            prediction_args[1],
+        )
         baseline = _recompute_metrics_from_predictions(baseline, prediction_args[0])
         candidate = _recompute_metrics_from_predictions(candidate, prediction_args[1])
     training_contract = _validate_training_contract(
         baseline,
         candidate,
         mode=args.training_contract,
-        expected_checkpoint_step=args.expected_checkpoint_step,
+        baseline_checkpoint_step=baseline_checkpoint_step,
+        candidate_checkpoint_step=candidate_checkpoint_step,
     )
     baseline_rows = _rows_by_uid(baseline, args.variant)
     candidate_rows = _rows_by_uid(candidate, args.variant)
@@ -1065,7 +1479,15 @@ def main() -> None:
         "training_contract": training_contract,
         "variant": args.variant,
         "split": baseline["split"],
-        "checkpoint_next_global_step": args.expected_checkpoint_step,
+        "checkpoint_next_global_step": (
+            candidate_checkpoint_step
+            if baseline_checkpoint_step == candidate_checkpoint_step
+            else None
+        ),
+        "checkpoint_steps": {
+            "baseline": baseline_checkpoint_step,
+            "candidate": candidate_checkpoint_step,
+        },
         "uid_clusters": len(uids),
         "rows": sum(len(baseline_rows[uid]) for uid in uids),
         "bootstrap": {
@@ -1092,6 +1514,7 @@ def main() -> None:
             "baseline": baseline.get("matched_metric_recomputation"),
             "candidate": candidate.get("matched_metric_recomputation"),
         },
+        "prediction_input_identity": prediction_input_identity,
         "candidate_causal_advantage": _causal_advantages(
             candidate,
             rng=rng,

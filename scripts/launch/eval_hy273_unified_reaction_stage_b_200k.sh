@@ -39,6 +39,7 @@ EDIT_CFG=3.0
 EDIT_SYSTEMS="source_copy,source_instruction_model,shuffled_source_instruction_model,source_shuffled_instruction_model,source_only_model,relative_instruction_only_ood"
 EVAL_PHASE="${EVAL_PHASE:-all}"
 ALLOW_REACTION_LOSS_ABLATION="${ALLOW_REACTION_LOSS_ABLATION:-0}"
+ALLOW_SAME_MIX_EXTENSION_AT_STEP="${ALLOW_SAME_MIX_EXTENSION_AT_STEP:-0}"
 MULTITASK_MANIFEST_ROOT="/mnt/afs/mogo_base/datasets/HY273_multitask_v1/manifests/hy273_multitask_v1"
 EDIT_COUNTERFACTUAL_ROOT="${EDIT_COUNTERFACTUAL_ROOT:-/mnt/afs/mogeflow-control/outputs/hy273_multitask/gates}"
 
@@ -61,12 +62,62 @@ for checkpoint in "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}"; do
   }
 done
 
-"${PYTHON_BIN}" - "${STAGE_A_CHECKPOINT}" "${STAGE_B_CHECKPOINT}" "${STAGE_B_STEP}" "${ALLOW_REACTION_LOSS_ABLATION}" <<'PY'
+"${PYTHON_BIN}" - \
+  "${STAGE_A_CHECKPOINT}" \
+  "${STAGE_B_CHECKPOINT}" \
+  "${STAGE_B_STEP}" \
+  "${ALLOW_REACTION_LOSS_ABLATION}" \
+  "${ALLOW_SAME_MIX_EXTENSION_AT_STEP}" <<'PY'
 import sys
 from copy import deepcopy
 
 import torch
-from train_hy273_unified_actor import CHECKPOINT_FORMAT, validate_config
+from train_hy273_unified_actor import (
+    CHECKPOINT_FORMAT,
+    validate_config,
+    validate_resume_config,
+)
+
+
+def expected_task_counts(segments, checkpoint_step):
+    expected = {
+        "realized_hml": 0,
+        "realized_edit": 0,
+        "realized_interaction": 0,
+    }
+    previous_end = 0
+    covered = 0
+    paired_key = None
+    for segment in segments:
+        start = int(segment["start"])
+        end = int(segment["end"])
+        if start != previous_end or end <= start:
+            raise RuntimeError("Task schedule is not contiguous and non-empty")
+        current_paired_key = "reaction" if "reaction" in segment else "interaction"
+        if paired_key is None:
+            paired_key = current_paired_key
+        elif paired_key != current_paired_key:
+            raise RuntimeError("Task schedule changes paired-task key")
+        weights = {
+            "realized_hml": int(segment["t2m"]),
+            "realized_edit": int(segment["edit"]),
+            "realized_interaction": int(segment[current_paired_key]),
+        }
+        if min(weights.values()) < 0 or sum(weights.values()) != 100:
+            raise RuntimeError("Task schedule weights must sum to 100")
+        active = max(0, min(end, checkpoint_step) - start)
+        if active:
+            covered += active
+            for key, weight in weights.items():
+                numerator = active * weight
+                if numerator % 100:
+                    raise RuntimeError("Checkpoint has fractional expected task counts")
+                expected[key] += numerator // 100
+        previous_end = end
+    if covered != checkpoint_step:
+        raise RuntimeError("Task schedule does not cover the checkpoint step")
+    return expected
+
 
 rows = []
 for path, expected_step in zip(sys.argv[1:3], (100_000, int(sys.argv[3]))):
@@ -95,11 +146,45 @@ for path, expected_step in zip(sys.argv[1:3], (100_000, int(sys.argv[3]))):
     scheduler_state = scheduler.get("state") if isinstance(scheduler, dict) else None
     if not isinstance(scheduler_state, dict) or int(scheduler_state.get("next_step", -1)) != expected_step:
         raise RuntimeError(f"Task scheduler does not match step {expected_step}: {path}")
-    if sum(
-        int(scheduler_state.get(key, -expected_step))
-        for key in ("realized_hml", "realized_edit", "realized_interaction")
-    ) != expected_step:
-        raise RuntimeError(f"Task scheduler counts do not sum to step {expected_step}: {path}")
+    config_segments = list(config["schedule"]["segments"])
+    if scheduler.get("segments") != config_segments:
+        raise RuntimeError(f"Scheduler/config segments differ: {path}")
+    expected_counts = expected_task_counts(config_segments, expected_step)
+    actual_counts = {
+        key: int(scheduler_state.get(key, -1)) for key in expected_counts
+    }
+    if actual_counts != expected_counts:
+        raise RuntimeError(
+            f"Wrong absolute task counts at {expected_step}: "
+            f"{actual_counts} != {expected_counts}"
+        )
+    if any(
+        int(scheduler_state.get(key, -1)) != 0
+        for key in ("debt_hml", "debt_edit", "debt_interaction")
+    ):
+        raise RuntimeError(f"Non-zero task debt at {expected_step}: {path}")
+    ordinals = batcher.get("next_global_sample_ordinal")
+    cursors = batcher.get("cursors")
+    local_batch_sizes = batcher.get("local_batch_sizes")
+    world_size = int(batcher.get("world_size", -1))
+    if not all(isinstance(value, dict) for value in (ordinals, cursors, local_batch_sizes)):
+        raise RuntimeError(f"Incomplete stream state: {path}")
+    for state_key, stream_id in (
+        ("realized_hml", 0),
+        ("realized_edit", 1),
+        ("realized_interaction", 2),
+    ):
+        stream_key = str(stream_id)
+        global_batch = int(local_batch_sizes.get(stream_key, -1)) * world_size
+        cursor = cursors.get(stream_key)
+        expected_ordinal = expected_counts[state_key] * global_batch
+        if (
+            global_batch <= 0
+            or not isinstance(cursor, dict)
+            or int(cursor.get("global_batch_size", -1)) != global_batch
+            or int(ordinals.get(stream_key, -1)) != expected_ordinal
+        ):
+            raise RuntimeError(f"Stream {stream_id} is not aligned at {expected_step}")
     rows.append(
         {
             "run_name": str(checkpoint.get("run_name", "")),
@@ -138,27 +223,44 @@ def tensors_equal(first, second):
     )
 
 
+allow_same_mix_extension_at_step = int(sys.argv[5])
+if allow_same_mix_extension_at_step < 0:
+    raise RuntimeError("ALLOW_SAME_MIX_EXTENSION_AT_STEP must be non-negative")
 if (
     rows[0]["normalization"] != rows[1]["normalization"]
     or not tensors_equal(rows[0]["normalizer"], rows[1]["normalizer"])
     or rows[0]["batcher_static"] != rows[1]["batcher_static"]
-    or rows[0]["schedule"] != rows[1]["schedule"]
 ):
-    raise RuntimeError("Stage-A and Stage-B do not share data, normalization, or task schedule")
+    raise RuntimeError("Stage-A and Stage-B do not share data or normalization")
 allow_reaction_loss_ablation = sys.argv[4] == "1"
+stage_a_config = deepcopy(rows[0]["config"])
+stage_b_config = deepcopy(rows[1]["config"])
 if allow_reaction_loss_ablation:
-    stage_a_config = deepcopy(rows[0]["config"])
-    stage_b_config = deepcopy(rows[1]["config"])
-    stage_a_reaction_loss = stage_a_config.pop("reaction_loss")
-    stage_b_reaction_loss = stage_b_config.pop("reaction_loss")
-    contracts_match = (
-        stage_a_config == stage_b_config
-        and stage_a_reaction_loss != stage_b_reaction_loss
+    stage_a_reaction_loss = stage_a_config.get("reaction_loss")
+    stage_b_reaction_loss = stage_b_config.get("reaction_loss")
+    if stage_a_reaction_loss == stage_b_reaction_loss:
+        raise RuntimeError("Requested Reaction-loss ablation is absent")
+    stage_a_config["reaction_loss"] = deepcopy(stage_b_reaction_loss)
+
+if allow_same_mix_extension_at_step:
+    if (
+        not allow_reaction_loss_ablation
+        and rows[0]["run_name"] != rows[1]["run_name"]
+    ):
+        raise RuntimeError("Same-mix extension checkpoints belong to different runs")
+    validate_resume_config(
+        stage_a_config,
+        stage_b_config,
+        allow_same_mix_extension_at_step=allow_same_mix_extension_at_step,
     )
+    contracts_match = True
 else:
     contracts_match = (
-        rows[0]["run_name"] == rows[1]["run_name"]
-        and rows[0]["config"] == rows[1]["config"]
+        stage_a_config == stage_b_config
+        and (
+            allow_reaction_loss_ablation
+            or rows[0]["run_name"] == rows[1]["run_name"]
+        )
     )
 if not contracts_match:
     raise RuntimeError(
