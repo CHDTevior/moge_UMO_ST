@@ -59,6 +59,7 @@ FULLTEXT_STAGE_B_CONTRACT = "fulltext_stage_b"
 FULLTEXT_STAGE_B_CONTINUE_CONTRACT = "fulltext_stage_b_continue"
 FULLTEXT_REACTION_V2_STAGE_B_CONTRACT = "fulltext_reaction_v2_stage_b"
 FULLTEXT_STAGE_C_CONTROL_CONTRACT = "fulltext_stage_c_control"
+FULLTEXT_REACTION_V5_1_CONTROL_CONTRACT = "fulltext_reaction_v5_1_control"
 FULLTEXT_PHASE_CONTRACTS = (
     "",
     FULLTEXT_STAGE_A_CONTRACT,
@@ -66,6 +67,7 @@ FULLTEXT_PHASE_CONTRACTS = (
     FULLTEXT_STAGE_B_CONTINUE_CONTRACT,
     FULLTEXT_REACTION_V2_STAGE_B_CONTRACT,
     FULLTEXT_STAGE_C_CONTROL_CONTRACT,
+    FULLTEXT_REACTION_V5_1_CONTROL_CONTRACT,
 )
 STAGE_C_CONTROL_CONFIG = {
     "enabled": True,
@@ -84,6 +86,27 @@ STAGE_C_CONTROL_CONFIG = {
     "continuous_loss": 0.25,
     "contact_loss": 0.02857142857142857,
 }
+REACTION_V5_1_CONTROL_CONFIG = {
+    "enabled": True,
+    "start_step": 300_000,
+    "end_step": 400_000,
+    "present_probability": 0.80,
+    "mixed_probability": 0.25,
+    "max_sparse_keyframes": 20,
+    "dense_min_fraction": 1.0,
+    "endpoint_preset": "kimodo_ee",
+    "endpoint_subset_mode": "random_nonempty",
+    "include_root_ref_for_endpoints": True,
+    "include_endpoint_rotations": True,
+    "include_contact_pattern": True,
+    "root_heading_probability": 0.5,
+    "continuous_loss": 0.25,
+    "contact_loss": 0.02857142857142857,
+}
+REGISTERED_ORTHOGONAL_CONTROL_CONFIGS = (
+    STAGE_C_CONTROL_CONFIG,
+    REACTION_V5_1_CONTROL_CONFIG,
+)
 REACTION_GRADIENT_COMPONENTS = (
     "adaptive_distance",
     "close_vector",
@@ -163,14 +186,17 @@ def validate_config(config: Mapping[str, Any]) -> None:
     max_global_step = int(cfg(config, "training.max_global_step"))
     control_enabled = bool(cfg_optional(config, "control.enabled", False))
     allowed_steps = (
-        {500_000}
+        {
+            int(profile["end_step"])
+            for profile in REGISTERED_ORTHOGONAL_CONTROL_CONFIGS
+        }
         if control_enabled
         else {200_000, 250_000, 300_000, 350_000}
     )
     if max_global_step not in allowed_steps:
         raise ValueError(
             "Unified actor supports the frozen 200K-350K base curriculum or "
-            "the registered 350K-500K orthogonal-Control stage"
+            "a registered orthogonal-Control stage"
         )
     expected_segments = [
         {"start": 0, "end": 100000, "t2m": 100, "edit": 0, paired_key: 0},
@@ -190,9 +216,13 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if paired_task != "reaction":
             raise ValueError("Orthogonal Control Stage C requires paired_task=reaction")
         actual_control = dict(cfg(config, "control"))
-        if actual_control != STAGE_C_CONTROL_CONFIG:
+        if actual_control not in REGISTERED_ORTHOGONAL_CONTROL_CONFIGS:
             raise ValueError(
                 "Orthogonal Control Stage C requires the registered Kimodo control contract"
+            )
+        if max_global_step != int(actual_control["end_step"]):
+            raise ValueError(
+                "Orthogonal Control max_global_step must equal control.end_step"
             )
         if bool(cfg_optional(config, "ease.enabled", False)):
             raise ValueError("Ease must remain disabled during orthogonal Control Stage C")
@@ -318,6 +348,21 @@ def validate_fulltext_phase_contract(
             raise ValueError(
                 "Full-text Control Stage C resume step must be in "
                 f"[{start_step},{stop_step})"
+            )
+        return
+
+    if phase_contract == FULLTEXT_REACTION_V5_1_CONTROL_CONTRACT:
+        if not has_resume:
+            raise ValueError("Reaction-v5.1 Control requires the 300K checkpoint")
+        if not run_dir_exists:
+            raise FileNotFoundError(
+                "Reaction-v5.1 Control requires the existing v5.1 run directory"
+            )
+        if int(declared_stop_step) != 400_000:
+            raise ValueError("Reaction-v5.1 Control must declare stop_step=400000")
+        if global_step is not None and not 300_000 <= int(global_step) < 400_000:
+            raise ValueError(
+                "Reaction-v5.1 Control resume step must be in [300000,400000)"
             )
         return
 
@@ -1245,6 +1290,12 @@ def validate_resume_config(
     control_transition_matches = False
     if allow_control_stage_transition_at_step is not None:
         boundary = int(allow_control_stage_transition_at_step)
+        current_control = dict(cfg(current_dict, "control"))
+        control_start = int(current_control.get("start_step", -1))
+        control_end = int(current_control.get("end_step", -1))
+        registered_control = (
+            current_control in REGISTERED_ORTHOGONAL_CONTROL_CONFIGS
+        )
         checkpoint_segments = list(cfg(checkpoint_dict, "schedule.segments"))
         current_segments = list(cfg(current_dict, "schedule.segments"))
         if len(checkpoint_segments) == len(current_segments) and checkpoint_segments:
@@ -1255,8 +1306,8 @@ def validate_resume_config(
             schedule_extension = (
                 checkpoint_segments[:-1] == current_segments[:-1]
                 and checkpoint_last == current_last
-                and checkpoint_end == boundary == 350_000
-                and current_end == 500_000
+                and checkpoint_end == boundary == control_start
+                and current_end == control_end
             )
             checkpoint_max = int(cfg(checkpoint_dict, "training.max_global_step"))
             current_max = int(cfg(current_dict, "training.max_global_step"))
@@ -1275,10 +1326,10 @@ def validate_resume_config(
             control_transition_matches = (
                 schedule_extension
                 and checkpoint_max == boundary
-                and current_max == current_end
+                and current_max == current_end == control_end
                 and not bool(cfg_optional(checkpoint_dict, "control.enabled", False))
                 and bool(cfg(current_dict, "control.enabled"))
-                and dict(cfg(current_dict, "control")) == STAGE_C_CONTROL_CONFIG
+                and registered_control
                 and normalized_checkpoint == current_dict
             )
     reaction_v2_transition_matches = False
@@ -1555,7 +1606,11 @@ def main() -> None:
                     args.phase_contract == FULLTEXT_STAGE_B_CONTINUE_CONTRACT
                 ),
                 allow_control_stage_transition=(
-                    args.phase_contract == FULLTEXT_STAGE_C_CONTROL_CONTRACT
+                    args.phase_contract
+                    in {
+                        FULLTEXT_STAGE_C_CONTROL_CONTRACT,
+                        FULLTEXT_REACTION_V5_1_CONTROL_CONTRACT,
+                    }
                 ),
                 allow_reaction_v2_transition=(
                     args.phase_contract == FULLTEXT_REACTION_V2_STAGE_B_CONTRACT
@@ -2241,11 +2296,17 @@ def main() -> None:
                 if _distributed():
                     dist.barrier()
 
+        if _distributed():
+            dist.barrier()
         if rank == 0:
             print(
                 json.dumps(
                     {
-                        "event": "stage_complete",
+                        "event": (
+                            "partial_complete"
+                            if global_step < declared_stop_step
+                            else "stage_complete"
+                        ),
                         "run": args.name,
                         "next_global_step": global_step,
                         "ema_update_count": ema_update_count,
@@ -2255,6 +2316,8 @@ def main() -> None:
                 ),
                 flush=True,
             )
+        if _distributed():
+            dist.barrier()
     finally:
         if batcher is not None:
             batcher.close()
