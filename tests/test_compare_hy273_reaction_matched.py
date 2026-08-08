@@ -268,6 +268,88 @@ def test_independent_run_contract_requires_external_parent_lineage(
     assert "external launch records" in result["parent_lineage_note"]
 
 
+def _v5_2_gate_contracts(*, extra_candidate_change: bool = False) -> tuple[dict, dict]:
+    baseline_config, _ = _dose_configs()
+    baseline_config = {
+        **baseline_config,
+        "reaction_loss": {
+            "fine_min_flow_t": 0.2,
+            "joint_distance": 0.0273,
+            "min_flow_t": 0.2,
+        },
+    }
+    candidate_reaction_loss = {
+        **baseline_config["reaction_loss"],
+        "fine_min_flow_t": 0.0,
+        "min_flow_t": 0.0,
+    }
+    if extra_candidate_change:
+        candidate_reaction_loss["joint_distance"] = 0.03
+    candidate_config = {
+        **baseline_config,
+        "reaction_loss": candidate_reaction_loss,
+    }
+    baseline = _dose_contract(
+        200_000,
+        baseline_config,
+        (130_000, 35_000, 35_000),
+    )
+    candidate = _dose_contract(
+        200_000,
+        candidate_config,
+        (130_000, 35_000, 35_000),
+    )
+    baseline["run_name"] = "reaction_v5_1"
+    candidate["run_name"] = "reaction_v5_2"
+    return baseline, candidate
+
+
+def test_v5_2_contract_accepts_only_all_timestep_gate_change(monkeypatch) -> None:
+    contracts = iter(_v5_2_gate_contracts())
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._load_checkpoint_contract",
+        lambda *args, **kwargs: next(contracts),
+    )
+
+    result = _validate_training_contract(
+        {},
+        {},
+        mode="reaction_v5_2_all_t_fine",
+        baseline_checkpoint_step=200_000,
+        candidate_checkpoint_step=200_000,
+    )
+
+    assert result["config_differences"] == [
+        {
+            "path": "reaction_loss.fine_min_flow_t",
+            "baseline": 0.2,
+            "candidate": 0.0,
+        },
+        {
+            "path": "reaction_loss.min_flow_t",
+            "baseline": 0.2,
+            "candidate": 0.0,
+        },
+    ]
+
+
+def test_v5_2_contract_rejects_an_extra_loss_change(monkeypatch) -> None:
+    contracts = iter(_v5_2_gate_contracts(extra_candidate_change=True))
+    monkeypatch.setattr(
+        "tools.compare_hy273_reaction_matched._load_checkpoint_contract",
+        lambda *args, **kwargs: next(contracts),
+    )
+
+    with pytest.raises(ValueError, match="do not implement"):
+        _validate_training_contract(
+            {},
+            {},
+            mode="reaction_v5_2_all_t_fine",
+            baseline_checkpoint_step=200_000,
+            candidate_checkpoint_step=200_000,
+        )
+
+
 def test_dose_contract_rejects_shifted_absolute_exposures(monkeypatch) -> None:
     base_config, candidate_config = _dose_configs()
     contracts = iter(

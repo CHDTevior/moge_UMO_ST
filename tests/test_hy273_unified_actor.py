@@ -615,6 +615,95 @@ def test_reaction_v5_1_full_contact_respects_fine_gate_and_padding() -> None:
     assert float(padded.total) == 0.0
 
 
+def test_reaction_v5_2_full_contact_is_active_at_flow_epsilon() -> None:
+    target = _identity_interaction_motion(frames=4)
+    prediction = target.clone()
+    target[:, 1, :, ROOT_SLICE.start] = torch.tensor([3.0, 0.0, 0.0, 3.0])
+    prediction[:, 1, :, ROOT_SLICE.start] = torch.tensor([3.0, 3.0, 0.0, 0.0])
+    weights = _reaction_v5_1_contact_weights(
+        joint_distance=1.0,
+        close_joint_vector=1.0,
+        min_flow_t=0.0,
+        coarse_min_flow_t=0.0,
+        fine_min_flow_t=0.0,
+    )
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=prediction,
+        target_physical=target,
+        actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+        timesteps=torch.tensor([1.0e-4]),
+        weights=weights,
+    )
+    assert float(bundle.fine_active_scene_fraction) == 1.0
+    for name in (
+        "interaction_joint_distance",
+        "interaction_close_joint_vector",
+        "interaction_fk_contact_map_positive",
+        "interaction_fk_contact_map_negative",
+        "interaction_fk_contact_vector",
+        "interaction_fk_contact_transition",
+    ):
+        assert bundle.terms[name].denominator.item() > 0
+        assert float(bundle.terms[name].weighted) > 0.0
+
+
+def test_reaction_v5_2_active_fraction_excludes_source_absent_scenes() -> None:
+    target = _identity_interaction_motion(frames=3).repeat(2, 1, 1, 1)
+    actor_valid = torch.ones(2, 2, 3, dtype=torch.bool)
+    actor_valid[1, 0] = False
+    bundle = compute_hy273_interaction_loss(
+        prediction_physical=target.clone(),
+        target_physical=target,
+        actor_valid=actor_valid,
+        timesteps=torch.full((2,), 1.0e-4),
+        weights=_reaction_v5_1_contact_weights(
+            min_flow_t=0.0,
+            coarse_min_flow_t=0.0,
+            fine_min_flow_t=0.0,
+        ),
+    )
+    assert float(bundle.fine_active_scene_fraction) == 0.5
+    numerator, denominator = bundle.diagnostic_ratios[
+        "fine_active_scene_fraction"
+    ]
+    assert float(numerator) == 1.0
+    assert float(denominator) == 2.0
+
+
+def test_reaction_min_flow_t_is_noop_with_explicit_coarse_and_fine_gates() -> None:
+    target = _identity_interaction_motion(frames=4)
+    prediction = target.clone()
+    prediction[:, 1, :, ROOT_SLICE.start] = torch.tensor([0.0, 0.4, 0.0, -0.4])
+    baseline_weights = _reaction_v5_1_contact_weights(
+        min_flow_t=0.2,
+        coarse_min_flow_t=0.0,
+        fine_min_flow_t=0.2,
+    )
+    candidate_weights = replace(baseline_weights, min_flow_t=0.0)
+    bundles = []
+    gradients = []
+    for weights in (baseline_weights, candidate_weights):
+        local_prediction = prediction.clone().requires_grad_(True)
+        bundle = compute_hy273_interaction_loss(
+            prediction_physical=local_prediction,
+            target_physical=target,
+            actor_valid=torch.ones(1, 2, 4, dtype=torch.bool),
+            timesteps=torch.tensor([0.1]),
+            weights=weights,
+        )
+        bundles.append(bundle)
+        gradients.append(torch.autograd.grad(bundle.total, local_prediction)[0])
+    torch.testing.assert_close(bundles[0].total, bundles[1].total, rtol=0, atol=0)
+    torch.testing.assert_close(gradients[0], gradients[1], rtol=0, atol=0)
+    for name in bundles[0].terms:
+        torch.testing.assert_close(
+            bundles[0].terms[name].weighted,
+            bundles[1].terms[name].weighted,
+            rtol=0,
+            atol=0,
+        )
+
+
 def test_reaction_v4_layout_is_signed_3d_and_shared_yaw_invariant() -> None:
     target = torch.zeros(1, 2, 3, DIM_HY273)
     prediction = target.clone()
@@ -1651,6 +1740,32 @@ def test_reaction_v5_1_real_config_only_adds_full_contact_loss() -> None:
     assert weights.fk_contact_map_negative == pytest.approx(0.005)
     assert weights.fk_contact_vector == pytest.approx(0.002)
     assert weights.fk_contact_transition == pytest.approx(0.003)
+
+
+def test_reaction_v5_2_real_config_only_opens_all_timestep_gates() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    v5_1_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v5_1_full_contact.yaml"
+    )
+    v5_2_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v5_2_all_t_fine.yaml"
+    )
+    validate_config(v5_2_config)
+    expected = {
+        **v5_1_config,
+        "reaction_loss": {
+            **v5_1_config["reaction_loss"],
+            "min_flow_t": 0.0,
+            "fine_min_flow_t": 0.0,
+        },
+    }
+    assert v5_2_config == expected
+    weights = make_interaction_weights(v5_2_config)
+    assert weights.min_flow_t == 0.0
+    assert weights.coarse_gate == 0.0
+    assert weights.fine_gate == 0.0
 
 
 def test_reaction_v5_config_disables_full_contact_without_changing_old_total() -> None:

@@ -713,6 +713,20 @@ def _validate_training_contract(
         baseline_checkpoint_step != candidate_checkpoint_step
     ):
         raise ValueError(f"{mode} requires same-step checkpoints")
+    absolute_task_exposures: dict[str, dict[str, int]] | None = None
+    if mode != "same_run_dose_extension":
+        baseline_exposures = _validate_scheduler_at_step(
+            left, baseline_checkpoint_step
+        )
+        candidate_exposures = _validate_scheduler_at_step(
+            right, candidate_checkpoint_step
+        )
+        if baseline_exposures != candidate_exposures:
+            raise ValueError("Independent comparison arms have different task exposures")
+        absolute_task_exposures = {
+            "baseline": baseline_exposures,
+            "candidate": candidate_exposures,
+        }
     if mode == "p_only_ablation":
         expected_differences = [
             (("reaction_loss", "close_joint_vector"), 0.0, 0.01),
@@ -762,6 +776,11 @@ def _validate_training_contract(
             (("reaction_loss", "fk_contact_transition_beta"), None, 0.1),
             (("reaction_loss", "fk_contact_vector"), None, 0.002),
             (("reaction_loss", "fk_contact_vector_scale_m"), None, 0.05),
+        ]
+    elif mode == "reaction_v5_2_all_t_fine":
+        expected_differences = [
+            (("reaction_loss", "fine_min_flow_t"), 0.2, 0.0),
+            (("reaction_loss", "min_flow_t"), 0.2, 0.0),
         ]
     elif mode == "same_run_dose_extension":
         if candidate_checkpoint_step <= baseline_checkpoint_step:
@@ -891,6 +910,7 @@ def _validate_training_contract(
             else "external_launch_record_required"
         ),
         "parent_lineage_verified_by_comparator": False,
+        "absolute_task_exposures": absolute_task_exposures,
         "parent_lineage_note": (
             "The comparator verifies matching run metadata and exact saved data-stream "
             "continuity. It does not prove model/EMA/optimizer resume ancestry or "
@@ -1297,6 +1317,7 @@ def main() -> None:
             "reaction_v3_adaptive",
             "reaction_v4_layout",
             "reaction_v5_1_full_contact",
+            "reaction_v5_2_all_t_fine",
             "same_run_dose_extension",
         ),
         default="p_only_ablation",
@@ -1337,6 +1358,7 @@ def main() -> None:
         in {
             "reaction_v4_layout",
             "reaction_v5_1_full_contact",
+            "reaction_v5_2_all_t_fine",
             "same_run_dose_extension",
         }
         and prediction_args[0] is None
