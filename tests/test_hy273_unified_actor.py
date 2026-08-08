@@ -1768,6 +1768,99 @@ def test_reaction_v5_2_real_config_only_opens_all_timestep_gates() -> None:
     assert weights.fine_gate == 0.0
 
 
+def test_reaction_v5_2_continue300k_only_extends_the_frozen_mix() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    v5_2_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v5_2_all_t_fine.yaml"
+    )
+    extended_config, _ = load_config(
+        repository
+        / "configs/hy273_unified_fulltext_reaction_v5_2_all_t_fine_continue300k.yaml"
+    )
+    validate_config(extended_config)
+    expected = {
+        **v5_2_config,
+        "schedule": {
+            "segments": [
+                {"start": 0, "end": 100_000, "t2m": 100, "edit": 0, "reaction": 0},
+                {
+                    "start": 100_000,
+                    "end": 300_000,
+                    "t2m": 30,
+                    "edit": 35,
+                    "reaction": 35,
+                },
+            ]
+        },
+        "training": {
+            **v5_2_config["training"],
+            "max_global_step": 300_000,
+        },
+    }
+    assert extended_config == expected
+    validate_resume_config(
+        v5_2_config,
+        extended_config,
+        allow_same_mix_extension_at_step=200_000,
+    )
+
+
+def test_reaction_v5_2_launchers_preserve_training_and_evaluation_protocols() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    continuation = (
+        repository
+        / "scripts/launch/train_hy273_unified_reaction_v5_2_continue300k_ddp8.sh"
+    ).read_text()
+    continue_250k = (
+        repository
+        / "scripts/launch/train_hy273_unified_reaction_stage_b_continue250k_ddp8.sh"
+    ).read_text()
+    continue_50k = (
+        repository
+        / "scripts/launch/train_hy273_unified_reaction_stage_b_continue50k_ddp8.sh"
+    ).read_text()
+    evaluation_200k = (
+        repository
+        / "scripts/launch/eval_hy273_unified_reaction_v5_2_200k_final.sh"
+    ).read_text()
+    evaluation_300k = (
+        repository
+        / "scripts/launch/eval_hy273_unified_reaction_v5_2_300k_final.sh"
+    ).read_text()
+
+    assert (
+        'CHECKPOINT="${CURRENT_CHECKPOINT}" STOP_STEP=250000' in continuation
+    )
+    assert (
+        "bash scripts/launch/"
+        "train_hy273_unified_reaction_stage_b_continue250k_ddp8.sh"
+        in continuation
+    )
+    assert '[[ "${STOP_STEP}" == "250000" ]]' in continue_250k
+    assert (
+        'CHECKPOINT="${CURRENT_CHECKPOINT}" STOP_STEP=300000' in continuation
+    )
+    assert (
+        "bash scripts/launch/"
+        "train_hy273_unified_reaction_stage_b_continue50k_ddp8.sh"
+        in continuation
+    )
+    assert (
+        '[[ "${STOP_STEP}" == "300000" || "${STOP_STEP}" == "350000" ]]'
+        in continue_50k
+    )
+
+    for evaluation in (evaluation_200k, evaluation_300k):
+        assert "EDIT_CFG=3.0" in evaluation
+        assert "EVAL_PHASE=all" in evaluation
+    assert "--training_contract reaction_v5_2_all_t_fine" in evaluation_200k
+    assert "--expected_checkpoint_step 200000" in evaluation_200k
+    assert "--training_contract same_run_dose_extension" in evaluation_300k
+    assert "--baseline_checkpoint_step 200000" in evaluation_300k
+    assert "--candidate_checkpoint_step 300000" in evaluation_300k
+
+
 def test_reaction_v5_config_disables_full_contact_without_changing_old_total() -> None:
     repository = Path(__file__).resolve().parents[1]
     v5_config, _ = load_config(
